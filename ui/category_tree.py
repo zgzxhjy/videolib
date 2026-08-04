@@ -1,3 +1,5 @@
+import os
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QInputDialog,
@@ -12,13 +14,14 @@ from domain.repository import Repository
 
 
 class CategoryTree(QTreeWidget):
-    """Hierarchical category sidebar. Emits categorySelected(None) for root view."""
+    """Hierarchical category sidebar for one scan root. Emits categorySelected(None) for root view."""
 
     category_selected = pyqtSignal(object)  # int | None
 
     def __init__(self, repo: Repository, parent=None):
         super().__init__(parent)
         self._repo = repo
+        self._root = ""
         self.setHeaderHidden(True)
         self.setMinimumWidth(180)
         self.itemClicked.connect(self._on_click)
@@ -27,19 +30,22 @@ class CategoryTree(QTreeWidget):
         self.itemExpanded.connect(lambda _: self._cache_expanded())
         self.itemCollapsed.connect(lambda _: self._cache_expanded())
         self._expanded: set[int] = set()
-        self.reload()
+        self.reload(self._root)
 
     # ---------- population ----------
 
-    def reload(self) -> None:
+    def reload(self, root: str | None = None) -> None:
+        if root is not None:
+            self._root = root
         self.blockSignals(True)
         self.clear()
-        root_item = QTreeWidgetItem(["全部视频"])
+        label = os.path.basename(os.path.normpath(self._root)) if self._root else "全部视频"
+        root_item = QTreeWidgetItem([label])
         root_item.setData(0, Qt.ItemDataRole.UserRole, None)
         root_item.setExpanded(True)
         self.addTopLevelItem(root_item)
 
-        cats = self._repo.get_categories()
+        cats = self._repo.get_categories(self._root)
         by_parent: dict[int | None, list] = {}
         for c in cats:
             by_parent.setdefault(c.parent_id, []).append(c)
@@ -98,7 +104,7 @@ class CategoryTree(QTreeWidget):
         name, ok = QInputDialog.getText(self, "新建分类", "分类名称:")
         if not ok or not name.strip():
             return
-        self._repo.add_category(name.strip(), parent_id)
+        self._repo.add_category(name.strip(), parent_id, root=self._root)
         self.reload()
 
     def _rename(self, item: QTreeWidgetItem, cid: int) -> None:

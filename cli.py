@@ -4,7 +4,7 @@ import time
 import config
 from domain.repository import Repository
 from services.metadata import build_video
-from services.scanner import scan_directory
+from services.scanner import diff_scan, scan_directory
 
 
 def cmd_index(args) -> None:
@@ -14,19 +14,21 @@ def cmd_index(args) -> None:
     files = scan_directory(args.root)
     print(f"found {len(files)} video files in {time.perf_counter() - start:.1f}s")
 
+    need_probe, stale = diff_scan(files, repo.existing_under(args.root))
+    print(f"{len(need_probe)} to probe, {len(stale)} stale under root")
+
     videos = []
-    for i, fp in enumerate(files, 1):
+    for i, fp in enumerate(need_probe, 1):
         videos.append(build_video(fp))
         if i % 200 == 0:
-            print(f"  probed {i}/{len(files)}")
+            print(f"  probed {i}/{len(need_probe)}")
     changed = repo.upsert_videos(videos)
     print(f"upserted {len(videos)} rows ({changed} changed)")
 
-    known = repo.all_filepaths()
-    missing = [fp for fp in known if fp not in set(files)]
-    if missing:
-        n = repo.remove_by_filepaths(missing)
+    if stale:
+        n = repo.remove_by_filepaths(stale)
         print(f"removed {n} stale entries")
+    repo.register_scan(args.root)
     print(f"total in db: {repo.count()}")
     repo.close()
 

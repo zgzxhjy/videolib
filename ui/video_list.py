@@ -157,13 +157,18 @@ class VideoTableModel(QAbstractTableModel):
         self._requested.clear()
         self.endResetModel()
 
-    def refresh(self, query: str = "", category_id: int | None = None) -> None:
+    def refresh(
+        self,
+        query: str = "",
+        category_id: int | None = None,
+        root: str | None = None,
+    ) -> None:
         if category_id is not None:
             videos = self._repo.videos_in_category(category_id)
         elif query:
             videos = self._repo.search(query)
         else:
-            videos = self._repo.all_videos()
+            videos = self._repo.videos_in_root(root)
         self.set_videos(videos)
 
     def refresh_favorites(self) -> None:

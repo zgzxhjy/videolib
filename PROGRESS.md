@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-04（会话 3 结束）
+> 最后更新：2026-08-04（会话 3 结束，多根目录功能）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,7 +9,7 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，27 个用例全绿
+- 测试：pytest，37 个用例全绿
 - git：10 个提交，工作区干净，分支 master
 
 ## 2. 已实现功能（全部可用）
@@ -17,11 +17,14 @@
 | 模块 | 说明 |
 |------|------|
 | 索引 | 全量扫描（后台线程）+ watchdog 增量监控（2s 防抖），扫描目录持久化到 settings.json |
+| 多根目录 | 库 = 所有扫描过目录的并集；stale 清理只限当前 root 内，切换目录不删其他目录数据（收藏/分类安全）；`scan_roots` 表记忆历史目录，工具栏「历史目录」下拉一键跳转+增量重扫 |
+| 当前目录视图 | 列表默认绑定当前扫描目录（「当前目录」按钮）；扫描新目录/点历史目录时**先跳转再扫描**（列表立刻显示该目录已知数据，后台增量同步）；工具栏另有「所有目录」并集视图、分类树根节点=当前目录名 |
+| 增量扫描 | `diff_scan` 按 size+mtime 比对，未变化文件跳过 PyAV 探测（重扫已记忆目录秒级完成）；video_id 稳定 → 缩略图复用不重生成 |
 | 元数据 | PyAV 提取时长/分辨率/编码，全部入库 |
 | 搜索 | FTS5 全文 + LIKE 兜底（支持中文），300ms 防抖搜索栏 |
-| 分类 | 层级树（右键增删改、禁止移入自身子树）、批量添加/移除、对话框内可新建分类、移除时只列所属分类 |
+| 分类 | 层级树（右键增删改、禁止移入自身子树），**分类按扫描目录隔离**（`categories.root` 列，切换目录树即切换）；遗留旧分类启动时一次性收养到 watch_root；跨目录分配被拦截 |
 | 播放 | QMediaPlayer 播放器，断点续播 + 播放历史（最近播放视图） |
-| 收藏 | 收藏夹视图，右键批量收藏 |
+| 收藏 | 收藏夹视图，右键批量收藏，跨目录保留 |
 | 缩略图 | 纯 PyAV 生成（170x96，16:9 裁切填满），懒生成 + 4 线程池，孤儿清理，失败写日志 |
 | 列表 | 虚拟滚动，行内「▶ 播放」按钮列（hover/press 反馈），工具栏播放按钮，Enter/Space 快捷键，双击/右键播放 |
 | 批量操作 | 批量收藏、批量加/移分类 |
@@ -80,6 +83,9 @@ build.bat                               # 打包 → dist\VideoLib.exe
 5. **QTableView 缩略图小**：默认 `iconSize` 无效(-1,-1)，图标绘制退化 → 必须 `setIconSize(QSize(170,96))`；**`setColumnWidth` 必须在 `setModel` 之后调用**，否则被丢弃。
 6. **测试竞态**：watchdog observer 启动前创建文件会丢事件 → WatcherThread 暴露 `ready` 事件，测试先 wait。
 7. **FTS5 中文分词**：unicode61 对中文整段成 token → 搜索实现为 FTS + LIKE 双路（LIKE 转义 `_`/`%`/`\`）。
+8. **跨 root 路径匹配**：`existing_under` 用 `substr(filepath,1,length(?))=?`（前缀=normpath(root)+`\`），避免 `E:\zmk` 误匹配 `E:\zmk2`（LIKE 需转义，substr 无需）。
+9. **增量跳过判定**：size+mtime 双条件，mtime 用 1s 容差（NTFS 精度）；老库迁移 `ALTER TABLE ADD COLUMN` 用 `PRAGMA table_info` 判缺列（SCHEMA 的 CREATE IF NOT EXISTS 不会补列）。
+10. **目录不存在守卫**：`_start_scan` 先 `os.path.isdir`，防止移动硬盘未挂载时扫出 0 文件把该 root 记录全清。
 
 ## 6. 验证手段（可复用）
 
@@ -92,6 +98,9 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [ ] HiDPI：缩略图 2x 生成（340x192）+ QIcon dpr，当前高分屏略糊
 - [ ] 中文搜索优化：拼音首字母索引或 jieba 分词
 - [x] 扫描进度 UI：QProgressDialog + 取消（会话 3），ScanWorker 增加 `progress(done,total,fp)` / `done(bool)` / `cancel()`
+- [x] 多根目录 + 增量扫描 + 分类按目录隔离（会话 3）：`scan_roots` 表、`file_mtime` 列、`categories.root` 列，老库自动迁移；历史目录下拉重扫
+- [x] 列表绑定当前目录 + 先跳转再扫描（会话 3）：「当前目录/最近播放/收藏夹/所有目录」四视图，分类树根=当前目录名
+- [ ] 多目录同时监控：当前 watcher 只监控最后扫描的目录，其他目录的变更需手动重扫
 - [ ] 删除视频文件功能（当前只有打开所在文件夹）
 - [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
 

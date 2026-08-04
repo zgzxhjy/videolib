@@ -29,16 +29,24 @@ from ui.scan_worker import ScanWorker
 from ui.search_bar import SearchBar
 from ui.video_list import COL_PLAY, COL_THUMB, PlayTableView, VideoTableModel
 
+VIEW_CURRENT = "current"
 VIEW_ALL = "all"
 VIEW_FAVORITES = "favorites"
 VIEW_RECENT = "recent"
+
+
+def _under_root(path: str, root: str) -> bool:
+    p = os.path.normcase(os.path.normpath(path))
+    r = os.path.normcase(os.path.normpath(root))
+    return p == r or p.startswith(r + os.sep)
 
 
 class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self._repo = repo
-        self._view = VIEW_ALL
+        self._view = VIEW_CURRENT
+        self._current_root: str | None = None
         self._players: list[PlayerWindow] = []
         self._watcher: WatcherThread | None = None
         self._scanner: ScanWorker | None = None
@@ -66,7 +74,14 @@ class MainWindow(QMainWindow):
 
         root = config.load_settings().get("watch_root")
         if root and os.path.isdir(root):
+            self._activate_root(root)
             self._start_watcher(root, resume=True)
+
+    def _activate_root(self, root: str) -> None:
+        """Set the current scan root, adopt legacy categories, switch the tree."""
+        self._current_root = root
+        self._repo.adopt_legacy_categories(root)
+        self.tree.reload(root)
 
     def closeEvent(self, event) -> None:
         if self._watcher is not None:
@@ -83,12 +98,24 @@ class MainWindow(QMainWindow):
         self.play_action.setEnabled(False)
         tb.addSeparator()
         tb.addAction("扫描目录", self._pick_and_scan)
+        self._history_menu = QMenu(self)
+        self._history_action = tb.addAction("历史目录")
+        self._history_action.setMenu(self._history_menu)
         tb.addAction("刷新", self._refresh_all)
         tb.addSeparator()
-        tb.addAction("全部视频", lambda: self._set_view(VIEW_ALL))
+        tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
         tb.addAction("收藏夹", lambda: self._set_view(VIEW_FAVORITES))
+        tb.addAction("所有目录", lambda: self._set_view(VIEW_ALL))
         self.addToolBar(tb)
+        self._rebuild_history_menu()
+
+    def _rebuild_history_menu(self) -> None:
+        self._history_menu.clear()
+        roots = self._repo.get_scan_roots()
+        self._history_action.setEnabled(bool(roots))
+        for r in roots:
+            self._history_menu.addAction(r, lambda r=r: self._start_scan(r))
 
     def _build_body(self) -> None:
         self.tree = CategoryTree(self._repo)
@@ -156,8 +183,10 @@ class MainWindow(QMainWindow):
             self.model.refresh_favorites()
         elif view == VIEW_RECENT:
             self.model.refresh_recent()
-        else:
+        elif view == VIEW_ALL:
             self.model.refresh()
+        else:
+            self.model.refresh(root=self._current_root)
 
     def _refresh_all(self) -> None:
         self.tree.reload()
@@ -173,7 +202,13 @@ class MainWindow(QMainWindow):
 
     def _start_scan(self, root: str) -> None:
         if self._scanner is not None:
+            self.statusBar().showMessage("已有扫描进行中，请稍候")
             return
+        if not os.path.isdir(root):
+            self.statusBar().showMessage(f"目录不存在或未连接: {root}")
+            return
+        self._activate_root(root)
+        self._set_view(VIEW_CURRENT)
         self.statusBar().showMessage(f"正在扫描 {root} ...")
         dialog = QProgressDialog("正在枚举视频文件...", "取消扫描", 0, 0, self)
         dialog.setWindowTitle("扫描进度")
@@ -206,6 +241,7 @@ class MainWindow(QMainWindow):
         dialog.deleteLater()
         self._refresh_all()
         if completed:
+            self._rebuild_history_menu()
             config.save_setting("watch_root", root)
             self._start_watcher(root)
             self.statusBar().showMessage("扫描完成，已开启增量监控")
@@ -225,8 +261,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已恢复监控: {root}")
 
     def _on_watch_changed(self) -> None:
-        if self._view == VIEW_ALL and not self.search.text():
+        if self.search.text():
+            return
+        if self._view == VIEW_CURRENT:
+            self.model.refresh(root=self._current_root)
+        elif self._view == VIEW_ALL:
             self.model.refresh()
+        elif self._view == VIEW_FAVORITES:
+            self.model.refresh_favorites()
+        elif self._view == VIEW_RECENT:
+            self.model.refresh_recent()
 
     def _on_search(self, text: str) -> None:
         self._view = VIEW_ALL
@@ -234,9 +278,9 @@ class MainWindow(QMainWindow):
         self.model.refresh(text)
 
     def _on_category_selected(self, category_id: int | None) -> None:
-        self._view = VIEW_ALL
+        self._view = VIEW_CURRENT
         self.search.clear()
-        self.model.refresh(category_id=category_id)
+        self.model.refresh(category_id=category_id, root=self._current_root)
         self.statusBar().showMessage(f"当前列表: {self.model.rowCount()} 个视频")
 
     def _play(self, video: Video | None) -> None:
@@ -287,14 +331,29 @@ class MainWindow(QMainWindow):
             self.model.refresh_favorites()
 
     def _assign_category(self, videos: list[Video]) -> None:
-        dialog = PickCategoryDialog(self._repo, "添加到分类", parent=self)
+        if self._current_root is None:
+            self.statusBar().showMessage("请先扫描一个目录")
+            return
+        in_root = [v for v in videos if _under_root(v.filepath, self._current_root)]
+        if not in_root:
+            self.statusBar().showMessage("所选视频都不在当前扫描目录下，无法分配分类")
+            return
+        dialog = PickCategoryDialog(self._repo, "添加到分类", root=self._current_root, parent=self)
         if dialog.exec() and dialog.selected_category_id() is not None:
-            self._repo.assign_batch([v.id for v in videos], dialog.selected_category_id())
-            self.statusBar().showMessage(f"已将 {len(videos)} 个视频添加到分类")
+            self._repo.assign_batch([v.id for v in in_root], dialog.selected_category_id())
+            if len(in_root) < len(videos):
+                self.statusBar().showMessage(
+                    f"已将 {len(in_root)} 个视频添加到分类（跳过 {len(videos) - len(in_root)} 个其他目录的视频）"
+                )
+            else:
+                self.statusBar().showMessage(f"已将 {len(in_root)} 个视频添加到分类")
 
     def _unassign_category(self, videos: list[Video]) -> None:
+        if self._current_root is None:
+            self.statusBar().showMessage("请先扫描一个目录")
+            return
         dialog = PickCategoryDialog(
-            self._repo, "从分类移除", video_ids=[v.id for v in videos], parent=self
+            self._repo, "从分类移除", root=self._current_root, video_ids=[v.id for v in videos], parent=self
         )
         if dialog.exec() and dialog.selected_category_id() is not None:
             self._repo.unassign_batch([v.id for v in videos], dialog.selected_category_id())

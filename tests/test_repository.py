@@ -145,3 +145,89 @@ def test_play_history_and_resume(repo):
     recent = repo.recent_plays(limit=10)
     assert len(recent) == 2
     assert recent[0][0].position == 5.0
+
+
+def test_upsert_persists_mtime(repo):
+    repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4", file_mtime=1234.5)])
+    assert repo.get_by_path(r"D:\v\a.mp4").file_mtime == 1234.5
+    repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4", file_mtime=9999.0)])
+    assert repo.get_by_path(r"D:\v\a.mp4").file_mtime == 9999.0
+
+
+def test_existing_under_scopes_by_root(repo):
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\x\a.mp4", file_size=1, file_mtime=1.0),
+        _mk("b.mp4", r"D:\x\sub\b.mp4", file_size=2, file_mtime=2.0),
+        _mk("c.mp4", r"D:\y\c.mp4", file_size=3, file_mtime=3.0),
+    ])
+    under = repo.existing_under(r"D:\x")
+    assert set(under) == {r"D:\x\a.mp4", r"D:\x\sub\b.mp4"}
+    assert under[r"D:\x\a.mp4"] == (1, 1.0)
+
+
+def test_videos_in_root(repo):
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\x\a.mp4"),
+        _mk("b.mp4", r"D:\x\sub\b.mp4"),
+        _mk("c.mp4", r"D:\y\c.mp4"),
+    ])
+    assert {v.filename for v in repo.videos_in_root(r"D:\x")} == {"a.mp4", "b.mp4"}
+    assert {v.filename for v in repo.videos_in_root(r"D:\y")} == {"c.mp4"}
+    assert len(repo.videos_in_root(None)) == 3
+
+
+def test_scan_roots_register_and_list(repo):
+    repo.register_scan(r"D:\a")
+    repo.register_scan(r"D:\b")
+    repo.register_scan(r"D:\a")
+    roots = repo.get_scan_roots()
+    assert roots[0] == r"D:\a"
+    assert set(roots) == {r"D:\a", r"D:\b"}
+
+
+def test_category_root_scoping(repo):
+    repo.add_category("甲", root=r"D:\a")
+    repo.add_category("乙", root=r"D:\b")
+    repo.add_category("丙")
+    assert [c.name for c in repo.get_categories(r"D:\a")] == ["甲"]
+    assert [c.name for c in repo.get_categories(r"D:\b")] == ["乙"]
+    assert len(repo.get_categories()) == 3
+
+
+def test_adopt_legacy_categories(repo):
+    repo.add_category("旧")
+    assert repo.adopt_legacy_categories(r"D:\a") == 1
+    assert [c.name for c in repo.get_categories(r"D:\a")] == ["旧"]
+    assert repo.adopt_legacy_categories(r"D:\b") == 0
+
+
+def test_migration_adds_columns(tmp_path):
+    """A DB created before multi-root support must be upgraded in place."""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE videos (
+            id INTEGER PRIMARY KEY, filename TEXT NOT NULL,
+            filepath TEXT UNIQUE NOT NULL, file_size INTEGER DEFAULT 0,
+            duration REAL, resolution TEXT, codec TEXT, thumb_path TEXT,
+            scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE categories (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+            parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+    """)
+    conn.execute("INSERT INTO categories (name) VALUES ('旧分类')")
+    conn.commit()
+    conn.close()
+
+    repo = Repository(db)
+    try:
+        vcols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(videos)")}
+        assert "file_mtime" in vcols
+        ccols = {r["name"] for r in repo._conn.execute("PRAGMA table_info(categories)")}
+        assert "root" in ccols
+        assert len(repo.get_categories()) == 1
+    finally:
+        repo.close()

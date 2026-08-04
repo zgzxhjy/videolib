@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -10,6 +11,7 @@ CREATE TABLE IF NOT EXISTS videos (
     filename TEXT NOT NULL,
     filepath TEXT UNIQUE NOT NULL,
     file_size INTEGER DEFAULT 0,
+    file_mtime REAL,
     duration REAL,
     resolution TEXT,
     codec TEXT,
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+    root TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -56,6 +59,12 @@ CREATE TABLE IF NOT EXISTS favorites (
     video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS scan_roots (
+    id INTEGER PRIMARY KEY,
+    root TEXT UNIQUE NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -65,6 +74,7 @@ def _row_to_video(row: sqlite3.Row) -> Video:
         filename=row["filename"],
         filepath=row["filepath"],
         file_size=row["file_size"],
+        file_mtime=row["file_mtime"],
         duration=row["duration"],
         resolution=row["resolution"],
         codec=row["codec"],
@@ -85,7 +95,17 @@ class Repository:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns to databases created before multi-root support."""
+        video_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(videos)")}
+        if "file_mtime" not in video_cols:
+            self._conn.execute("ALTER TABLE videos ADD COLUMN file_mtime REAL")
+        cat_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(categories)")}
+        if "root" not in cat_cols:
+            self._conn.execute("ALTER TABLE categories ADD COLUMN root TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         with self._lock:
@@ -99,11 +119,12 @@ class Repository:
             return 0
         with self._lock:
             cur = self._conn.executemany(
-                """INSERT INTO videos (filename, filepath, file_size, duration, resolution, codec)
-                   VALUES (:filename, :filepath, :file_size, :duration, :resolution, :codec)
+                """INSERT INTO videos (filename, filepath, file_size, file_mtime, duration, resolution, codec)
+                   VALUES (:filename, :filepath, :file_size, :file_mtime, :duration, :resolution, :codec)
                    ON CONFLICT(filepath) DO UPDATE SET
                        filename=excluded.filename,
                        file_size=excluded.file_size,
+                       file_mtime=excluded.file_mtime,
                        duration=excluded.duration,
                        resolution=excluded.resolution,
                        codec=excluded.codec,
@@ -113,6 +134,7 @@ class Repository:
                         "filename": v.filename,
                         "filepath": v.filepath,
                         "file_size": v.file_size,
+                        "file_mtime": v.file_mtime,
                         "duration": v.duration,
                         "resolution": v.resolution,
                         "codec": v.codec,
@@ -126,6 +148,17 @@ class Repository:
     def all_filepaths(self) -> set[str]:
         with self._lock:
             return {r["filepath"] for r in self._conn.execute("SELECT filepath FROM videos")}
+
+    def existing_under(self, root: str) -> dict[str, tuple[int, float | None]]:
+        """Known videos under root: filepath -> (file_size, file_mtime)."""
+        prefix = os.path.normpath(root) + os.sep
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT filepath, file_size, file_mtime FROM videos
+                   WHERE substr(filepath, 1, length(?)) = ?""",
+                (prefix, prefix),
+            ).fetchall()
+            return {r["filepath"]: (r["file_size"], r["file_mtime"]) for r in rows}
 
     def remove_by_filepaths(self, paths: list[str]) -> int:
         if not paths:
@@ -174,6 +207,39 @@ class Repository:
             ).fetchall()
             return [_row_to_video(r) for r in rows]
 
+    def videos_in_root(self, root: str | None, limit: int = 500) -> list[Video]:
+        """Videos under a scan root. root=None falls back to the whole library."""
+        if root is None:
+            return self.all_videos(limit)
+        prefix = os.path.normpath(root) + os.sep
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM videos
+                   WHERE substr(filepath, 1, length(?)) = ?
+                   ORDER BY filename LIMIT ?""",
+                (prefix, prefix, limit),
+            ).fetchall()
+            return [_row_to_video(r) for r in rows]
+
+    # ---------- scan roots ----------
+
+    def register_scan(self, root: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO scan_roots (root, scanned_at)
+                   VALUES (?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(root) DO UPDATE SET scanned_at = CURRENT_TIMESTAMP""",
+                (os.path.normpath(root),),
+            )
+            self._conn.commit()
+
+    def get_scan_roots(self) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT root FROM scan_roots ORDER BY scanned_at DESC"
+            ).fetchall()
+            return [r["root"] for r in rows]
+
     # ---------- search ----------
 
     def search(self, query: str, limit: int = 500) -> list[Video]:
@@ -208,11 +274,13 @@ class Repository:
 
     # ---------- categories ----------
 
-    def add_category(self, name: str, parent_id: int | None = None) -> Category:
+    def add_category(
+        self, name: str, parent_id: int | None = None, root: str = ""
+    ) -> Category:
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO categories (name, parent_id) VALUES (?, ?)",
-                (name, parent_id),
+                "INSERT INTO categories (name, parent_id, root) VALUES (?, ?, ?)",
+                (name, parent_id, root),
             )
             self._conn.commit()
             row = self._conn.execute(
@@ -260,13 +328,28 @@ class Repository:
             self._conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
             self._conn.commit()
 
-    def get_categories(self) -> list[Category]:
+    def get_categories(self, root: str | None = None) -> list[Category]:
+        """All categories, or only those belonging to a scan root."""
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM categories ORDER BY name").fetchall()
+            if root is None:
+                rows = self._conn.execute("SELECT * FROM categories ORDER BY name").fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM categories WHERE root = ? ORDER BY name", (root,)
+                ).fetchall()
             return [
                 Category(id=r["id"], name=r["name"], parent_id=r["parent_id"])
                 for r in rows
             ]
+
+    def adopt_legacy_categories(self, root: str) -> int:
+        """Bind pre-multi-root categories (root='') to the given root. Returns count."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE categories SET root = ? WHERE root = ''", (root,)
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     def assign_category(self, video_id: int, category_id: int) -> None:
         with self._lock:

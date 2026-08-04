@@ -8,6 +8,7 @@ class Video:
     filename: str = ""
     filepath: str = ""
     file_size: int = 0
+    file_mtime: float | None = None
     duration: float | None = None
     resolution: str | None = None
     codec: str | None = None

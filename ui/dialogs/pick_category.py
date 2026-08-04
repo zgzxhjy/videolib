@@ -23,11 +23,13 @@ class PickCategoryDialog(QDialog):
         self,
         repo: Repository,
         title: str,
+        root: str = "",
         video_ids: list[int] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self._repo = repo
+        self._root = root
         self._video_ids = video_ids
         self._selected: int | None = None
         self.setWindowTitle(title)
@@ -58,7 +60,7 @@ class PickCategoryDialog(QDialog):
 
     def _reload(self) -> None:
         self.list.clear()
-        cats = self._repo.get_categories()
+        cats = self._repo.get_categories(self._root)
         if self._video_ids:
             own_ids = set()
             for vid in self._video_ids:
@@ -86,7 +88,7 @@ class PickCategoryDialog(QDialog):
         name, ok = QInputDialog.getText(self, "新建分类", "分类名称:")
         if not ok or not name.strip():
             return
-        self._repo.add_category(name.strip())
+        self._repo.add_category(name.strip(), root=self._root)
         self._reload()
 
     def _on_ok(self) -> None:
