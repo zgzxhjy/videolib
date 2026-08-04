@@ -71,6 +71,26 @@ def test_thumbnail_generation(video_dir, tmp_path):
     assert thumbs.path_for(1).exists()
     with open(thumbs.path_for(1), "rb") as f:
         assert f.read(2) == b"\xff\xd8"  # JPEG magic
+    import av
+
+    with av.open(str(thumbs.path_for(1))) as c:
+        stream = c.streams.video[0]
+        assert stream.height == 64  # height fixed to row height
+
+
+def test_thumbnail_failure_logged(tmp_path, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "APP_DIR", tmp_path / "appdata")
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    corrupt = tmp_path / "broken.mp4"
+    corrupt.write_bytes(b"this is not a video")
+    ok = thumbs.ensure(str(corrupt), video_id=99)
+    assert ok is False
+    assert not thumbs.path_for(99).exists()
+    log = tmp_path / "appdata" / "thumbnails.log"
+    assert log.exists()
+    assert str(corrupt) in log.read_text(encoding="utf-8")
 
 
 def test_thumbnail_persisted_to_repo(video_dir, tmp_path):

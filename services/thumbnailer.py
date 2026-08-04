@@ -5,27 +5,50 @@ import av
 
 import config
 
+THUMB_HEIGHT = 64
 
-def _extract_frame(filepath: str, thumb_path: Path, target_width: int = 320) -> bool:
-    """Seek to ~10% of the video, decode one frame, save as JPEG."""
+
+def _log_failure(filepath: str, exc: Exception) -> None:
+    try:
+        config.APP_DIR.mkdir(parents=True, exist_ok=True)
+        with open(config.APP_DIR / "thumbnails.log", "a", encoding="utf-8") as f:
+            f.write(f"{filepath}: {type(exc).__name__}: {exc}\n")
+    except OSError:
+        pass
+
+
+def _extract_frame(filepath: str, thumb_path: Path) -> bool:
+    """Seek to ~10% of the video, scale one frame, save as JPEG (pure PyAV)."""
     try:
         with av.open(filepath) as container:
             stream = next(
                 (s for s in container.streams if s.type == "video"), None
             )
             if stream is None:
-                return False
+                raise ValueError("no video stream")
             stream.thread_type = "AUTO"
             if stream.duration:
                 seek_pts = int(stream.duration * 0.1)
                 container.seek(seek_pts, backward=True, any_frame=False, stream=stream)
             frame = next(container.decode(video=0))
-            img = frame.to_image()
-            ratio = target_width / img.width
-            img = img.resize((target_width, max(1, int(img.height * ratio))))
-            img.save(thumb_path, "JPEG", quality=80)
+            ratio = THUMB_HEIGHT / frame.height
+            scaled = frame.reformat(
+                width=max(1, int(frame.width * ratio)),
+                height=THUMB_HEIGHT,
+                format="yuv420p",
+            )
+            with av.open(str(thumb_path), "w") as out:
+                jpeg = out.add_stream("mjpeg")
+                jpeg.width = scaled.width
+                jpeg.height = scaled.height
+                jpeg.pix_fmt = "yuvj420p"
+                for packet in jpeg.encode(scaled):
+                    out.mux(packet)
+                for packet in jpeg.encode():
+                    out.mux(packet)
             return True
-    except Exception:
+    except Exception as exc:
+        _log_failure(filepath, exc)
         return False
 
 
@@ -61,3 +84,20 @@ class Thumbnailer:
         finally:
             with self._lock:
                 self._pending.discard(filepath)
+
+    @staticmethod
+    def cleanup_orphans(thumbs_dir: str | Path, valid_ids: set[int]) -> int:
+        """Delete thumbnails whose video no longer exists in the DB."""
+        removed = 0
+        for f in Path(thumbs_dir).glob("*.jpg"):
+            try:
+                video_id = int(f.stem)
+            except ValueError:
+                continue
+            if video_id not in valid_ids:
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed

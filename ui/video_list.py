@@ -9,11 +9,20 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QIcon, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QStyledItemDelegate,
+    QStyle,
+    QTableView,
+)
 
 from domain.models import Video
 from domain.repository import Repository
-from services.thumbnailer import Thumbnailer
+from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
+
+COL_THUMB = 0
+COL_PLAY = 6
 
 
 class ThumbRunnable(QRunnable):
@@ -33,8 +42,99 @@ class ThumbRunnable(QRunnable):
             self.cb.thumb_ready.emit(self.video_id)
 
 
+class PlayButtonDelegate(QStyledItemDelegate):
+    """Draws a clickable 'play' button inside the play column."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover_row: int | None = None
+        self._press_row: int | None = None
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = option.rect.adjusted(6, 10, -6, -10)
+        if rect.height() <= 0:
+            painter.restore()
+            return
+        pressed = index.row() == self._press_row
+        hovered = index.row() == self._hover_row
+        if pressed:
+            bg, fg = QColor("#2458c9"), QColor("#ffffff")
+        elif hovered:
+            bg, fg = QColor("#2f6fed"), QColor("#ffffff")
+        else:
+            bg, fg = QColor("#e6ebf3"), QColor("#3a3f47")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 6, 6)
+        painter.setPen(fg)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "▶ 播放")
+        painter.restore()
+
+
+class PlayTableView(QTableView):
+    """Table with hover/press-aware play column."""
+
+    play_clicked = pyqtSignal(int)  # row
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._delegate = PlayButtonDelegate(self)
+        self._hover_row: int | None = None
+        self._press_row: int | None = None
+        self.setMouseTracking(True)
+
+    def setModel(self, model) -> None:
+        super().setModel(model)
+        self.setItemDelegateForColumn(COL_PLAY, self._delegate)
+
+    def _play_row_at(self, pos) -> int:
+        idx = self.indexAt(pos)
+        if idx.isValid() and idx.column() == COL_PLAY:
+            return idx.row()
+        return -1
+
+    def mouseMoveEvent(self, event) -> None:
+        row = self._play_row_at(event.position().toPoint())
+        if row != self._hover_row:
+            self._hover_row = row
+            self._delegate._hover_row = row
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover_row = None
+        self._press_row = None
+        self._delegate._hover_row = None
+        self._delegate._press_row = None
+        self.viewport().update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        row = self._play_row_at(event.position().toPoint())
+        if row >= 0 and event.button() == Qt.MouseButton.LeftButton:
+            self._press_row = row
+            self._delegate._press_row = row
+            self.viewport().update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        row = self._play_row_at(event.position().toPoint())
+        if (
+            row >= 0
+            and row == self._press_row
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self.play_clicked.emit(row)
+        self._press_row = None
+        self._delegate._press_row = None
+        self.viewport().update()
+        super().mouseReleaseEvent(event)
+
+
 class VideoTableModel(QAbstractTableModel):
-    COLUMNS = ["", "文件名", "时长", "分辨率", "编码", "大小"]
+    COLUMNS = ["", "文件名", "时长", "分辨率", "编码", "大小", "播放"]
 
     thumb_ready = pyqtSignal(int)
 
@@ -75,6 +175,11 @@ class VideoTableModel(QAbstractTableModel):
     def all_videos(self) -> list[Video]:
         return self._videos
 
+    def video_at(self, row: int) -> Video | None:
+        if 0 <= row < len(self._videos):
+            return self._videos[row]
+        return None
+
     # ---------- QAbstractTableModel ----------
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -93,10 +198,8 @@ class VideoTableModel(QAbstractTableModel):
             return None
         v = self._videos[index.row()]
         col = index.column()
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (2, 3, 4, 5):
+        if role == Qt.ItemDataRole.TextAlignmentRole and col in (2, 3, 4, 5, COL_PLAY):
             return int(Qt.AlignmentFlag.AlignCenter)
-        if role == Qt.ItemDataRole.ForegroundRole and col == 0:
-            return QColor("#888888")
         if role == Qt.ItemDataRole.DisplayRole:
             if col == 1:
                 return v.filename
@@ -108,7 +211,7 @@ class VideoTableModel(QAbstractTableModel):
                 return v.codec or ""
             if col == 5:
                 return _fmt_size(v.file_size)
-        if role == Qt.ItemDataRole.DecorationRole and col == 0:
+        if role == Qt.ItemDataRole.DecorationRole and col == COL_THUMB:
             return self._load_thumb(v)
         if role == Qt.ItemDataRole.UserRole:
             return v
@@ -122,7 +225,9 @@ class VideoTableModel(QAbstractTableModel):
     def _load_thumb(self, v: Video) -> QIcon | None:
         thumb = self._thumb_path(v.id)
         if thumb.exists():
-            return QIcon(QPixmap(str(thumb)))
+            pixmap = QPixmap(str(thumb))
+            if not pixmap.isNull():
+                return QIcon(pixmap)
         self._schedule(v)
         return QIcon()
 
@@ -139,7 +244,7 @@ class VideoTableModel(QAbstractTableModel):
     def _on_thumb_ready(self, video_id: int) -> None:
         for i, v in enumerate(self._videos):
             if v.id == video_id:
-                idx = self.index(i, 0)
+                idx = self.index(i, COL_THUMB)
                 self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
                 return
 

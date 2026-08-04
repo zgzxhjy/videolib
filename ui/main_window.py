@@ -2,6 +2,7 @@ import os
 import subprocess
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -10,7 +11,6 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSplitter,
-    QTableView,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -19,13 +19,14 @@ from PyQt6.QtWidgets import (
 import config
 from domain.models import Video
 from domain.repository import Repository
+from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
 from services.watcher import WatcherThread
 from ui.category_tree import CategoryTree
 from ui.dialogs.pick_category import PickCategoryDialog
 from ui.player import PlayerWindow
 from ui.scan_worker import ScanWorker
 from ui.search_bar import SearchBar
-from ui.video_list import VideoTableModel
+from ui.video_list import COL_PLAY, COL_THUMB, PlayTableView, VideoTableModel
 
 VIEW_ALL = "all"
 VIEW_FAVORITES = "favorites"
@@ -50,6 +51,14 @@ class MainWindow(QMainWindow):
         self.model = VideoTableModel(repo, config.THUMBS_DIR)
         self.table.setModel(self.model)
         self.model.refresh()
+        self.table.selectionModel().selectionChanged.connect(
+            lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
+        )
+        self._setup_shortcuts()
+
+        Thumbnailer.cleanup_orphans(
+            config.THUMBS_DIR, {v.id for v in self._repo.all_videos(10**6)}
+        )
 
         root = config.load_settings().get("watch_root")
         if root and os.path.isdir(root):
@@ -66,6 +75,9 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         tb = QToolBar("主工具栏")
         tb.setMovable(False)
+        self.play_action = tb.addAction("▶ 播放选中", self._play_selected)
+        self.play_action.setEnabled(False)
+        tb.addSeparator()
         tb.addAction("扫描目录", self._pick_and_scan)
         tb.addAction("刷新", self._refresh_all)
         tb.addSeparator()
@@ -81,20 +93,22 @@ class MainWindow(QMainWindow):
         self.search = SearchBar()
         self.search.search_submitted.connect(self._on_search)
 
-        self.table = QTableView()
+        self.table = PlayTableView()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(64)
-        self.table.setColumnWidth(0, 100)
+        self.table.verticalHeader().setDefaultSectionSize(THUMB_HEIGHT)
+        self.table.setColumnWidth(COL_THUMB, 120)
         self.table.setColumnWidth(1, 320)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for col in (2, 3, 4, 5):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(COL_PLAY, QHeaderView.ResizeMode.ResizeToContents)
         self.table.doubleClicked.connect(lambda idx: self._play(self._video_at(idx)))
+        self.table.play_clicked.connect(lambda row: self._play(self.model.video_at(row)))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_table_menu)
 
@@ -109,6 +123,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
+
+    def _setup_shortcuts(self) -> None:
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            shortcut = QShortcut(QKeySequence(key), self.table)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(self._play_selected)
 
     # ---------- helpers ----------
 
@@ -199,6 +219,11 @@ class MainWindow(QMainWindow):
         self._players.append(player)
         player.show()
 
+    def _play_selected(self) -> None:
+        videos = self._selected_videos()
+        if videos:
+            self._play(videos[0])
+
     def _on_player_closed(self, _video_id: int, _position: float) -> None:
         if self._view == VIEW_RECENT:
             self.model.refresh_recent()
@@ -232,13 +257,15 @@ class MainWindow(QMainWindow):
             self.model.refresh_favorites()
 
     def _assign_category(self, videos: list[Video]) -> None:
-        dialog = PickCategoryDialog(self._repo, "添加到分类", self)
+        dialog = PickCategoryDialog(self._repo, "添加到分类", parent=self)
         if dialog.exec() and dialog.selected_category_id() is not None:
             self._repo.assign_batch([v.id for v in videos], dialog.selected_category_id())
             self.statusBar().showMessage(f"已将 {len(videos)} 个视频添加到分类")
 
     def _unassign_category(self, videos: list[Video]) -> None:
-        dialog = PickCategoryDialog(self._repo, "从分类移除", self)
+        dialog = PickCategoryDialog(
+            self._repo, "从分类移除", video_ids=[v.id for v in videos], parent=self
+        )
         if dialog.exec() and dialog.selected_category_id() is not None:
             self._repo.unassign_batch([v.id for v in videos], dialog.selected_category_id())
             self.statusBar().showMessage(f"已从分类移除 {len(videos)} 个视频")
