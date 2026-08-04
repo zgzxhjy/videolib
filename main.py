@@ -9,9 +9,13 @@ from ui.main_window import MainWindow
 
 
 def main() -> int:
-    faulthandler.enable()
     config.APP_DIR.mkdir(parents=True, exist_ok=True)
     config.THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        crash_log = open(config.APP_DIR / "crash.log", "a", encoding="utf-8")
+        faulthandler.enable(file=crash_log)
+    except OSError:
+        pass
     repo = Repository(config.DB_PATH)
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
