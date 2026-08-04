@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -50,6 +50,9 @@ class MainWindow(QMainWindow):
 
         self.model = VideoTableModel(repo, config.THUMBS_DIR)
         self.table.setModel(self.model)
+        self.table.setIconSize(QSize(THUMB_WIDTH, THUMB_HEIGHT))
+        self.table.setColumnWidth(COL_THUMB, THUMB_WIDTH)
+        self.table.verticalHeader().setDefaultSectionSize(THUMB_HEIGHT)
         self.model.refresh()
         self.table.selectionModel().selectionChanged.connect(
             lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
