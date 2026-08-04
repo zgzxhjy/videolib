@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 import config
 from domain.models import Video
 from domain.repository import Repository
-from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
+from services.thumbnailer import THUMB_HEIGHT, THUMB_WIDTH, Thumbnailer
 from services.watcher import WatcherThread
 from ui.category_tree import CategoryTree
 from ui.dialogs.pick_category import PickCategoryDialog
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(THUMB_HEIGHT)
-        self.table.setColumnWidth(COL_THUMB, 120)
+        self.table.setColumnWidth(COL_THUMB, THUMB_WIDTH)
         self.table.setColumnWidth(1, 320)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)

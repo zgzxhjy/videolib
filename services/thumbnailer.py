@@ -2,10 +2,13 @@ import threading
 from pathlib import Path
 
 import av
+from av.filter import Graph
 
 import config
 
-THUMB_HEIGHT = 64
+THUMB_WIDTH = 170
+THUMB_HEIGHT = 96
+THUMB_ASPECT = THUMB_WIDTH / THUMB_HEIGHT  # ~16:9, crops source to fill
 
 
 def _log_failure(filepath: str, exc: Exception) -> None:
@@ -17,8 +20,42 @@ def _log_failure(filepath: str, exc: Exception) -> None:
         pass
 
 
+def _center_crop(frame: av.VideoFrame) -> av.VideoFrame:
+    """Center-crop to the thumbnail aspect so the image fills the cell."""
+    src_w, src_h = frame.width, frame.height
+    target_ar = THUMB_ASPECT
+    if src_w / src_h > target_ar:
+        crop_w = int(round(src_h * target_ar))
+        crop_w -= crop_w % 2  # keep even for yuv420p
+        x0 = (src_w - crop_w) // 2
+        x0 -= x0 % 2
+        crop_h, y0 = src_h, 0
+    else:
+        crop_h = int(round(src_w / target_ar))
+        crop_h -= crop_h % 2
+        y0 = (src_h - crop_h) // 2
+        y0 -= y0 % 2
+        crop_w, x0 = src_w, 0
+
+    graph = Graph()
+    src = graph.add(
+        "buffer",
+        video_size=f"{src_w}x{src_h}",
+        pix_fmt=frame.format.name,
+        time_base="1/25",
+        frame_rate="25/1",
+    )
+    crop = graph.add("crop", w=str(crop_w), h=str(crop_h), x=str(x0), y=str(y0))
+    sink = graph.add("buffersink")
+    src.link_to(crop)
+    crop.link_to(sink)
+    graph.configure()
+    src.push(frame)
+    return sink.pull()
+
+
 def _extract_frame(filepath: str, thumb_path: Path) -> bool:
-    """Seek to ~10% of the video, scale one frame, save as JPEG (pure PyAV)."""
+    """Seek to ~10% of the video, crop-fill and scale one frame, save as JPEG (pure PyAV)."""
     try:
         with av.open(filepath) as container:
             stream = next(
@@ -31,9 +68,8 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
                 seek_pts = int(stream.duration * 0.1)
                 container.seek(seek_pts, backward=True, any_frame=False, stream=stream)
             frame = next(container.decode(video=0))
-            ratio = THUMB_HEIGHT / frame.height
-            scaled = frame.reformat(
-                width=max(1, int(frame.width * ratio)),
+            scaled = _center_crop(frame).reformat(
+                width=THUMB_WIDTH,
                 height=THUMB_HEIGHT,
                 format="yuv420p",
             )

@@ -65,6 +65,8 @@ def test_build_video(video_dir):
 
 
 def test_thumbnail_generation(video_dir, tmp_path):
+    from services.thumbnailer import THUMB_HEIGHT, THUMB_WIDTH
+
     thumbs = Thumbnailer(tmp_path / "thumbs")
     ok = thumbs.ensure(str(video_dir), video_id=1)
     assert ok
@@ -75,7 +77,25 @@ def test_thumbnail_generation(video_dir, tmp_path):
 
     with av.open(str(thumbs.path_for(1))) as c:
         stream = c.streams.video[0]
-        assert stream.height == 64  # height fixed to row height
+        assert stream.width == THUMB_WIDTH
+        assert stream.height == THUMB_HEIGHT
+
+
+def test_thumbnail_crop_fills_cell(tmp_path):
+    """A 2:1 wide source must still produce a filled 170x96 thumbnail."""
+    import av
+
+    from services.thumbnailer import THUMB_HEIGHT, THUMB_WIDTH, _center_crop
+
+    frame = av.VideoFrame(128, 64, "yuv420p")  # 2:1
+    cropped = _center_crop(frame)
+    assert cropped.height == 64
+    assert abs(cropped.width / cropped.height - THUMB_WIDTH / THUMB_HEIGHT) < 0.05
+
+    frame = av.VideoFrame(64, 128, "yuv420p")  # 1:2 portrait
+    cropped = _center_crop(frame)
+    assert cropped.width == 64
+    assert abs(cropped.width / cropped.height - THUMB_WIDTH / THUMB_HEIGHT) < 0.05
 
 
 def test_thumbnail_failure_logged(tmp_path, monkeypatch):
