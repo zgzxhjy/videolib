@@ -66,6 +66,12 @@ class VideoTableModel(QAbstractTableModel):
             videos = self._repo.all_videos()
         self.set_videos(videos)
 
+    def refresh_favorites(self) -> None:
+        self.set_videos(self._repo.get_favorites())
+
+    def refresh_recent(self) -> None:
+        self.set_videos([v for _rec, v in self._repo.recent_plays(limit=200)])
+
     def all_videos(self) -> list[Video]:
         return self._videos
 
