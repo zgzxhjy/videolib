@@ -1,3 +1,4 @@
+import faulthandler
 import sys
 
 from PyQt6.QtWidgets import QApplication
@@ -8,6 +9,7 @@ from ui.main_window import MainWindow
 
 
 def main() -> int:
+    faulthandler.enable()
     config.APP_DIR.mkdir(parents=True, exist_ok=True)
     config.THUMBS_DIR.mkdir(parents=True, exist_ok=True)
     repo = Repository(config.DB_PATH)

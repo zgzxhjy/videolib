@@ -33,6 +33,7 @@ def test_watcher_adds_and_removes(watch_env):
     repo, root = watch_env
     thread = WatcherThread(str(root), repo)
     thread.start()
+    assert thread.ready.wait(5), "observer did not become ready"
     try:
         new_file = root / "new_video.mp4"
         _make_test_video(new_file)
@@ -51,6 +52,7 @@ def test_watcher_ignores_non_video(watch_env):
     repo, root = watch_env
     thread = WatcherThread(str(root), repo)
     thread.start()
+    assert thread.ready.wait(5), "observer did not become ready"
     try:
         (root / "notes.txt").write_text("hello")
         time.sleep(3.5)

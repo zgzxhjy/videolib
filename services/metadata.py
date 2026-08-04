@@ -31,10 +31,14 @@ def probe(filepath: str) -> tuple[float | None, str | None, str | None]:
 def build_video(filepath: str) -> Video:
     p = Path(filepath)
     duration, resolution, codec = probe(filepath)
+    try:
+        file_size = p.stat().st_size
+    except OSError:
+        file_size = 0
     return Video(
         filename=p.name,
         filepath=filepath,
-        file_size=p.stat().st_size if p.exists() else 0,
+        file_size=file_size,
         duration=duration,
         resolution=resolution,
         codec=codec,

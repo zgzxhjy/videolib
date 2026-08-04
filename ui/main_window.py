@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self._view = VIEW_ALL
         self._players: list[PlayerWindow] = []
         self._watcher: WatcherThread | None = None
+        self._scanner: ScanWorker | None = None
         self.setWindowTitle(f"{config.APP_NAME} - 视频管理")
         self.resize(1100, 700)
 
@@ -148,12 +149,14 @@ class MainWindow(QMainWindow):
 
     def _start_scan(self, root: str) -> None:
         self.statusBar().showMessage(f"正在扫描 {root} ...")
-        worker = ScanWorker(root, self._repo)
+        worker = ScanWorker(root, self._repo, self)
         worker.message.connect(self.statusBar().showMessage)
         worker.done.connect(lambda: self._on_scan_done(root))
+        self._scanner = worker
         worker.start()
 
     def _on_scan_done(self, root: str) -> None:
+        self._scanner = None
         self._refresh_all()
         config.save_setting("watch_root", root)
         self._start_watcher(root)

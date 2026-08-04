@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 
@@ -57,6 +58,7 @@ class WatcherThread(QThread):
         self._changed: set[str] = set()
         self._stop_flag = False
         self._flush_ts = 0.0
+        self.ready = threading.Event()
 
     def stop(self) -> None:
         self._stop_flag = True
@@ -66,6 +68,7 @@ class WatcherThread(QThread):
         observer = Observer()
         observer.schedule(handler, self._root, recursive=True)
         observer.start()
+        self.ready.set()
         self.message.emit(f"正在监控目录: {self._root}")
         try:
             while not self._stop_flag:
