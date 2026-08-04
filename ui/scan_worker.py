@@ -3,6 +3,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from domain.repository import Repository
 from services.metadata import build_video
 from services.scanner import diff_scan, scan_directory
+from services.thumbnailer import Thumbnailer
 
 
 class ScanWorker(QThread):
@@ -52,7 +53,8 @@ class ScanWorker(QThread):
                 self.message.emit(f"扫描已取消，保留已处理的 {len(videos)} 个视频")
             else:
                 if stale:
-                    self._repo.remove_by_filepaths(stale)
+                    deleted_ids = self._repo.remove_by_filepaths(stale)
+                    Thumbnailer().delete_for(deleted_ids)
                 self._repo.register_scan(self._root)
                 self.message.emit(
                     f"索引完成，库中共 {self._repo.count()} 个视频（清理 {len(stale)} 个失效记录）"

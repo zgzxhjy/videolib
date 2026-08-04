@@ -45,7 +45,8 @@ def test_upsert_updates_existing(repo):
 
 def test_remove_by_paths(repo):
     repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4"), _mk("b.mp4", r"D:\v\b.mp4")])
-    assert repo.remove_by_filepaths([r"D:\v\a.mp4"]) == 1
+    a_id = repo.get_by_path(r"D:\v\a.mp4").id
+    assert repo.remove_by_filepaths([r"D:\v\a.mp4"]) == [a_id]
     assert repo.count() == 1
     assert repo.get_by_path(r"D:\v\b.mp4") is not None
 
@@ -260,10 +261,11 @@ def test_remove_videos_under(repo):
         _mk("c.mp4", r"D:\b\c.mp4"),
     ])
     a = repo.get_by_path(r"D:\a\a.mp4")
+    b = repo.get_by_path(r"D:\a\sub\b.mp4")
     lst = repo.create_favorite_list("收藏夹_默认")
     repo.add_favorite(a.id, lst.id)
-    n = repo.remove_videos_under(r"D:\a")
-    assert n == 2
+    deleted = repo.remove_videos_under(r"D:\a")
+    assert sorted(deleted) == sorted([a.id, b.id])
     assert repo.get_by_path(r"D:\a\a.mp4") is None
     assert repo.get_by_path(r"D:\b\c.mp4") is not None
     assert repo.count_favorites(lst.id) == 0, "favorite links must cascade"

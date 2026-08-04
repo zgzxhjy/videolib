@@ -5,6 +5,7 @@ import config
 from domain.repository import Repository
 from services.metadata import build_video
 from services.scanner import diff_scan, scan_directory
+from services.thumbnailer import Thumbnailer
 
 
 def cmd_index(args) -> None:
@@ -26,8 +27,9 @@ def cmd_index(args) -> None:
     print(f"upserted {len(videos)} rows ({changed} changed)")
 
     if stale:
-        n = repo.remove_by_filepaths(stale)
-        print(f"removed {n} stale entries")
+        deleted_ids = repo.remove_by_filepaths(stale)
+        Thumbnailer().delete_for(deleted_ids)
+        print(f"removed {len(deleted_ids)} stale entries")
     repo.register_scan(args.root)
     print(f"total in db: {repo.count()}")
     repo.close()

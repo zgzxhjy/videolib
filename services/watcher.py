@@ -10,6 +10,7 @@ import config
 from domain.repository import Repository
 from services.metadata import build_video
 from services.scanner import scan_directory
+from services.thumbnailer import Thumbnailer
 
 
 class _Handler(FileSystemEventHandler):
@@ -84,7 +85,8 @@ class WatcherThread(QThread):
 
     def _flush(self) -> None:
         if self._removed:
-            self._repo.remove_by_filepaths(list(self._removed))
+            deleted_ids = self._repo.remove_by_filepaths(list(self._removed))
+            Thumbnailer().delete_for(deleted_ids)
             self._removed.clear()
         added = [p for p in self._added if Path(p).exists()]
         self._added.clear()

@@ -191,13 +191,22 @@ class Repository:
             ).fetchall()
             return {r["filepath"]: (r["file_size"], r["file_mtime"]) for r in rows}
 
-    def remove_by_filepaths(self, paths: list[str]) -> int:
+    def remove_by_filepaths(self, paths: list[str]) -> list[int]:
+        """Delete videos by filepath, returning the deleted video ids."""
         if not paths:
-            return 0
+            return []
         with self._lock:
-            cur = self._conn.executemany("DELETE FROM videos WHERE filepath = ?", [(p,) for p in paths])
-            self._conn.commit()
-            return cur.rowcount
+            ids = [
+                r["id"]
+                for r in self._conn.execute(
+                    f"SELECT id FROM videos WHERE filepath IN ({','.join('?' * len(paths))})",
+                    paths,
+                )
+            ]
+            if ids:
+                self._conn.executemany("DELETE FROM videos WHERE filepath = ?", [(p,) for p in paths])
+                self._conn.commit()
+            return ids
 
     def get_video(self, video_id: int) -> Video | None:
         with self._lock:
@@ -277,16 +286,28 @@ class Repository:
             self._conn.execute("DELETE FROM scan_roots WHERE root = ?", (root,))
             self._conn.commit()
 
-    def remove_videos_under(self, root: str) -> int:
-        """Delete all videos under a scan root (favorites/category links cascade)."""
+    def remove_videos_under(self, root: str) -> list[int]:
+        """Delete all videos under a scan root, returning the deleted video ids.
+
+        Favorites/category links cascade. Callers must also remove the
+        thumbnails for the returned ids (files would be reused by new rows).
+        """
         prefix = os.path.normpath(root) + os.sep
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
-                (prefix, prefix),
-            )
-            self._conn.commit()
-            return cur.rowcount
+            ids = [
+                r["id"]
+                for r in self._conn.execute(
+                    "SELECT id FROM videos WHERE substr(filepath, 1, length(?)) = ?",
+                    (prefix, prefix),
+                )
+            ]
+            if ids:
+                self._conn.execute(
+                    "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
+                    (prefix, prefix),
+                )
+                self._conn.commit()
+            return ids
 
     # ---------- search ----------
 

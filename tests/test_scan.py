@@ -149,6 +149,38 @@ def test_thumbnail_no_repeat_work(video_dir, tmp_path):
     assert thumbs.ensure(str(video_dir), 1) is True
 
 
+def test_delete_for_removes_only_target_thumbs(tmp_path):
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    for vid in (1, 2):
+        thumbs.path_for(vid).write_bytes(b"x")
+    (tmp_path / "thumbs" / "junk.txt").write_text("keep me")
+    assert thumbs.delete_for([1, 999]) == 1  # 999 has no file
+    assert not thumbs.path_for(1).exists()
+    assert thumbs.path_for(2).exists()
+    assert (tmp_path / "thumbs" / "junk.txt").exists()
+
+
+def test_thumb_not_reused_after_data_removed(video_dir, tmp_path):
+    """Regression: deleting a root's data must delete its thumbnails, since
+    SQLite reuses row ids and a stale {id}.jpg would show on a new video."""
+    repo = Repository(tmp_path / "db.sqlite")
+    repo.upsert_videos([build_video(str(video_dir))])
+    old = repo.get_by_path(str(video_dir))
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    assert thumbs.ensure(str(video_dir), old.id) is True
+
+    deleted = repo.remove_by_filepaths([str(video_dir)])
+    assert deleted == [old.id]
+    thumbs.delete_for(deleted)
+    assert not thumbs.path_for(old.id).exists()
+
+    repo.upsert_videos([build_video(str(video_dir))])
+    new = repo.get_by_path(str(video_dir))
+    assert new.id == old.id, "SQLite reuses row ids - stale thumbs would be hit"
+    assert not thumbs.path_for(new.id).exists()
+    repo.close()
+
+
 def _wait_for(condition, timeout=20.0, interval=0.05):
     import time
 

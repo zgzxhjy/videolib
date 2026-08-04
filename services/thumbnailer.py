@@ -137,3 +137,14 @@ class Thumbnailer:
                 except OSError:
                     pass
         return removed
+
+    def delete_for(self, ids) -> int:
+        """Delete thumbnails for deleted videos so their ids can never be reused."""
+        removed = 0
+        for video_id in ids:
+            try:
+                self.path_for(video_id).unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
