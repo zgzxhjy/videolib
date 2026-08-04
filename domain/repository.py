@@ -3,7 +3,9 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from domain.models import Category, PlayRecord, Video
+from domain.models import Category, FavoriteList, PlayRecord, Video
+
+DEFAULT_FAVORITE_LIST = "收藏夹_默认"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -55,9 +57,17 @@ CREATE TABLE IF NOT EXISTS play_history (
     position REAL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS favorites (
-    video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
-    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS favorite_lists (
+    id INTEGER PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS favorite_items (
+    list_id INTEGER REFERENCES favorite_lists(id) ON DELETE CASCADE,
+    video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (list_id, video_id)
 );
 
 CREATE TABLE IF NOT EXISTS scan_roots (
@@ -106,6 +116,27 @@ class Repository:
         cat_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(categories)")}
         if "root" not in cat_cols:
             self._conn.execute("ALTER TABLE categories ADD COLUMN root TEXT NOT NULL DEFAULT ''")
+        if self._has_table("favorites"):
+            n = self._conn.execute("SELECT COUNT(*) AS c FROM favorites").fetchone()["c"]
+            empty_lists = (
+                self._conn.execute("SELECT COUNT(*) AS c FROM favorite_lists").fetchone()["c"]
+            )
+            if n > 0 and empty_lists == 0:
+                cur = self._conn.execute(
+                    "INSERT INTO favorite_lists (name) VALUES (?)", (DEFAULT_FAVORITE_LIST,)
+                )
+                self._conn.execute(
+                    """INSERT INTO favorite_items (list_id, video_id, added_at)
+                       SELECT ?, video_id, added_at FROM favorites""",
+                    (cur.lastrowid,),
+                )
+            self._conn.execute("DROP TABLE favorites")
+
+    def _has_table(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        return row is not None
 
     def close(self) -> None:
         with self._lock:
@@ -239,6 +270,23 @@ class Repository:
                 "SELECT root FROM scan_roots ORDER BY scanned_at DESC"
             ).fetchall()
             return [r["root"] for r in rows]
+
+    def remove_scan_root(self, root: str) -> None:
+        """Forget a scan root. Videos under it are kept."""
+        with self._lock:
+            self._conn.execute("DELETE FROM scan_roots WHERE root = ?", (root,))
+            self._conn.commit()
+
+    def remove_videos_under(self, root: str) -> int:
+        """Delete all videos under a scan root (favorites/category links cascade)."""
+        prefix = os.path.normpath(root) + os.sep
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
+                (prefix, prefix),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     # ---------- search ----------
 
@@ -414,32 +462,93 @@ class Repository:
 
     # ---------- favorites ----------
 
-    def add_favorite(self, video_id: int) -> None:
+    def create_favorite_list(self, name: str) -> FavoriteList:
+        """Raise ValueError on duplicate name."""
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO favorite_lists (name) VALUES (?)", (name,)
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                raise ValueError(f"收藏夹「{name}」已存在") from None
+            return self._favorite_list(cur.lastrowid)
+
+    def rename_favorite_list(self, list_id: int, name: str) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR IGNORE INTO favorites (video_id) VALUES (?)", (video_id,)
+                "UPDATE favorite_lists SET name = ? WHERE id = ?", (name, list_id)
             )
             self._conn.commit()
 
-    def remove_favorite(self, video_id: int) -> None:
+    def delete_favorite_list(self, list_id: int) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM favorites WHERE video_id = ?", (video_id,))
+            self._conn.execute("DELETE FROM favorite_lists WHERE id = ?", (list_id,))
             self._conn.commit()
 
-    def is_favorite(self, video_id: int) -> bool:
+    def get_favorite_lists(self) -> list[FavoriteList]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM favorite_lists ORDER BY created_at, id"
+            ).fetchall()
+            return [self._favorite_list(r["id"]) for r in rows]
+
+    def _favorite_list(self, list_id: int) -> FavoriteList:
+        row = self._conn.execute(
+            "SELECT * FROM favorite_lists WHERE id = ?", (list_id,)
+        ).fetchone()
+        return FavoriteList(id=row["id"], name=row["name"], created_at=row["created_at"])
+
+    def count_favorites(self, list_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM favorite_items WHERE list_id = ?", (list_id,)
+            ).fetchone()
+            return row["c"]
+
+    def add_favorite(self, video_id: int, list_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO favorite_items (list_id, video_id) VALUES (?, ?)",
+                (list_id, video_id),
+            )
+            self._conn.commit()
+
+    def remove_favorite(self, video_id: int, list_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM favorite_items WHERE list_id = ? AND video_id = ?",
+                (list_id, video_id),
+            )
+            self._conn.commit()
+
+    def is_favorite(self, video_id: int, list_id: int) -> bool:
         with self._lock:
             return (
                 self._conn.execute(
-                    "SELECT 1 FROM favorites WHERE video_id = ?", (video_id,)
+                    "SELECT 1 FROM favorite_items WHERE list_id = ? AND video_id = ?",
+                    (list_id, video_id),
                 ).fetchone()
                 is not None
             )
 
-    def get_favorites(self) -> list[Video]:
+    def lists_of_video(self, video_id: int) -> list[FavoriteList]:
         with self._lock:
             rows = self._conn.execute(
-                """SELECT v.* FROM videos v JOIN favorites f ON f.video_id = v.id
-                   ORDER BY f.added_at DESC"""
+                """SELECT l.* FROM favorite_lists l
+                   JOIN favorite_items fi ON fi.list_id = l.id
+                   WHERE fi.video_id = ? ORDER BY l.created_at, l.id""",
+                (video_id,),
+            ).fetchall()
+            return [FavoriteList(id=r["id"], name=r["name"], created_at=r["created_at"]) for r in rows]
+
+    def get_favorites(self, list_id: int) -> list[Video]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT v.* FROM videos v
+                   JOIN favorite_items fi ON fi.video_id = v.id
+                   WHERE fi.list_id = ? ORDER BY fi.added_at DESC""",
+                (list_id,),
             ).fetchall()
             return [_row_to_video(r) for r in rows]
 

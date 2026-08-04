@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-04（会话 3 结束，多根目录功能）
+> 最后更新：2026-08-04（会话 4 结束：交互优化 + 删除功能）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,24 +9,24 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，37 个用例全绿
-- git：10 个提交，工作区干净，分支 master
+- 测试：pytest，52 个用例全绿
+- git：11 个提交（含已提交的 7baa29d/5213818；会话 4 改动待提交），分支 master
 
 ## 2. 已实现功能（全部可用）
 
 | 模块 | 说明 |
 |------|------|
 | 索引 | 全量扫描（后台线程）+ watchdog 增量监控（2s 防抖），扫描目录持久化到 settings.json |
-| 多根目录 | 库 = 所有扫描过目录的并集；stale 清理只限当前 root 内，切换目录不删其他目录数据（收藏/分类安全）；`scan_roots` 表记忆历史目录，工具栏「历史目录」下拉一键跳转+增量重扫 |
-| 当前目录视图 | 列表默认绑定当前扫描目录（「当前目录」按钮）；扫描新目录/点历史目录时**先跳转再扫描**（列表立刻显示该目录已知数据，后台增量同步）；工具栏另有「所有目录」并集视图、分类树根节点=当前目录名 |
-| 增量扫描 | `diff_scan` 按 size+mtime 比对，未变化文件跳过 PyAV 探测（重扫已记忆目录秒级完成）；video_id 稳定 → 缩略图复用不重生成 |
+| 多根目录 | 库 = 所有扫描过目录的并集；stale 清理只限当前 root 内，切换目录不删其他目录数据（收藏/分类安全）；`scan_roots` 表记忆历史目录，工具栏「历史目录」下拉一键跳转+增量重扫；**菜单底部「删除历史记录...」→ 删除模式对话框：「仅移除记录」（视频保留）/「删除并清除数据」（删该 root 全部视频，收藏/分类级联清除，二次确认）；删除的是监控目录时自动停 watcher 并清设置** |
+| 当前目录视图 | 列表默认绑定当前扫描目录（「当前目录」按钮）；扫描新目录/点历史目录时**先跳转再扫描**（列表立刻显示该目录已知数据，后台增量同步）；工具栏另有「所有目录」并集视图、分类树根节点=当前目录名；**启动默认「所有目录」页** |
+| 增量扫描 | `diff_scan` 按 size+mtime 比对，未变化文件跳过 PyAV 探测（重扫已记忆目录秒级完成）；video_id 稳定 → 缩略图复用不重生成；**空目录（无视频文件）不落库：不注册 scan_roots/不动现有数据，跳回上一目录并弹窗提示** |
 | 元数据 | PyAV 提取时长/分辨率/编码，全部入库 |
 | 搜索 | FTS5 全文 + LIKE 兜底（支持中文），300ms 防抖搜索栏 |
 | 分类 | 层级树（右键增删改、禁止移入自身子树），**分类按扫描目录隔离**（`categories.root` 列，切换目录树即切换）；遗留旧分类启动时一次性收养到 watch_root；跨目录分配被拦截 |
 | 播放 | QMediaPlayer 播放器，断点续播 + 播放历史（最近播放视图） |
-| 收藏 | 收藏夹视图，右键批量收藏，跨目录保留 |
+| 收藏 | 命名收藏夹（`收藏夹_***`，自动补前缀）：工具栏「收藏夹」下拉切换/新建/**删除（菜单底部「删除收藏夹...」→ 删除模式对话框，确认后记录清空、视频文件不受影响）**；右键「添加到收藏夹...」选夹（可内联新建，重名提示）、「从收藏夹移除...」只列含该视频的夹；旧单表收藏自动迁移到「收藏夹_默认」 |
 | 缩略图 | 纯 PyAV 生成（170x96，16:9 裁切填满），懒生成 + 4 线程池，孤儿清理，失败写日志 |
-| 列表 | 虚拟滚动，行内「▶ 播放」按钮列（hover/press 反馈），工具栏播放按钮，Enter/Space 快捷键，双击/右键播放 |
+| 列表 | 虚拟滚动，行内「▶ 播放」按钮列（hover/press 反馈，**列宽随按钮文字自适应**），工具栏播放按钮，Enter/Space 快捷键，双击/右键播放；**长文件名 wordWrap 换行显示（不省略号），超长标题行高自动增长（TitleWrapDelegate sizeHint 按真实列宽算换行高度，行高 = max(96 缩略图, 换行文本)）** |
 | 批量操作 | 批量收藏、批量加/移分类 |
 | 其他 | 打开所在文件夹（explorer /select）、状态栏提示 |
 | 扫描进度 | 非模态 QProgressDialog（WindowModal）：枚举阶段忙碌态→元数据阶段 i/n 进度+当前文件名，可取消（保留已处理部分、跳过 stale 清理），扫描期间防重入 |
@@ -54,8 +54,8 @@ videolib/
 │   ├── category_tree.py     # 分类树
 │   ├── scan_worker.py       # ScanWorker(QThread)
 │   ├── search_bar.py        # 防抖搜索
-│   └── dialogs/pick_category.py
-└── tests/                   # test_repository / test_scan / test_watcher，25 用例
+│   └── dialogs/pick_category.py、pick_favorite_list.py、pick_scan_root.py
+└── tests/                   # test_repository / test_scan / test_watcher / test_favorite_dialog，47 用例
 ```
 
 **分层铁律**：UI 只调 services/repository → repository 只碰 SQLite。
@@ -86,6 +86,14 @@ build.bat                               # 打包 → dist\VideoLib.exe
 8. **跨 root 路径匹配**：`existing_under` 用 `substr(filepath,1,length(?))=?`（前缀=normpath(root)+`\`），避免 `E:\zmk` 误匹配 `E:\zmk2`（LIKE 需转义，substr 无需）。
 9. **增量跳过判定**：size+mtime 双条件，mtime 用 1s 容差（NTFS 精度）；老库迁移 `ALTER TABLE ADD COLUMN` 用 `PRAGMA table_info` 判缺列（SCHEMA 的 CREATE IF NOT EXISTS 不会补列）。
 10. **目录不存在守卫**：`_start_scan` 先 `os.path.isdir`，防止移动硬盘未挂载时扫出 0 文件把该 root 记录全清。
+11. **空目录语义**：扫描目录 0 个视频 → ScanWorker `done("empty")` 提前返回（不 upsert/不删 stale/不注册），MainWindow 跳回 prev_root 弹窗。注意：若目录之前有视频、之后被清空，重扫会因 empty 提前返回而**不清理**旧记录（有意为之）。
+12. **收藏夹迁移**：旧 `favorites` 单表在 Repository 初始化时迁入 `收藏夹_默认` 后 DROP；`done` 信号已从 `bool` 改为 `str`（"ok"/"empty"/"cancel"）。
+13. **PyQt6 `QListWidget.addItem(str)` 返回 None**：C++ 重载返回 void，拿返回值会 `AttributeError`，且异常逃逸出 slot 时 PyQt6 走 `qFatal` 直接闪退（windowed 无输出）→ 必须用 `self.list.item(self.list.count()-1).setData(...)` 索引模式；slot 里永远不要依赖默认异常处理。
+14. **菜单按钮可见性即状态**：菜单每次重建才刷新 → 「删除收藏夹...」仅在存在收藏夹时显示、「删除历史记录...」仅在有历史时显示；对话框按钮用两个显式按钮（「仅移除记录」/「删除并清除数据」）而非选择器弹窗，测试直接用 `_delete_only`/`_delete_with_data` 驱动。
+15. **QHeaderView 丢弃 setModel 前的 section 配置**：不只是 `setColumnWidth`（坑 #5），`setSectionResizeMode(Stretch/ResizeToContents)` 在 setModel 之前设置同样全部失效 → 标题列曾静默退化为默认 100px 宽、长标题挤成碎片。铁律：**任何列宽/伸缩模式配置必须在 setModel 之后**。
+16. **纵向 ResizeToContents 会查询所有列**：行高计算时 QHeaderView 对所有列 delegate 的 sizeHint 取 max（实测第 1 列的 TitleWrapDelegate 会被调用，且 sizeHint 的 option.rect.width() 是真实列宽）→ 行高自适应只需给目标列挂 sizeHint-aware delegate + 纵向 ResizeToContents + 横向列宽变化后防抖 resizeSections。
+17. **Qt 换行断词规则**：TextWordWrap 只按可断点换行——CJK 每字可断（中文文件名正常换行），纯拉丁长串（无空格）视为不可断词不换行 → 测试换行必须用中文文本，`'x'*300` 测不出来（返回单行高）。
+18. **ResizeToContents 对纯自绘列塌缩**：播放列只有自绘 delegate、无 DisplayRole 文本 → 默认 sizeHint 为空 → 列宽塌缩到 28px 按钮被挤扁（列宽配置真正生效后才暴露）。铁律：**自绘 delegate（无文本/图标）必须覆盖 sizeHint**（返回按钮文字宽 + 内边距），横向表头会按列 delegate 的 sizeHint 定宽。
 
 ## 6. 验证手段（可复用）
 
@@ -100,8 +108,12 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 扫描进度 UI：QProgressDialog + 取消（会话 3），ScanWorker 增加 `progress(done,total,fp)` / `done(bool)` / `cancel()`
 - [x] 多根目录 + 增量扫描 + 分类按目录隔离（会话 3）：`scan_roots` 表、`file_mtime` 列、`categories.root` 列，老库自动迁移；历史目录下拉重扫
 - [x] 列表绑定当前目录 + 先跳转再扫描（会话 3）：「当前目录/最近播放/收藏夹/所有目录」四视图，分类树根=当前目录名
+- [x] 交互优化（会话 4）：长文件名换行、空目录不落库跳回弹窗、启动默认所有目录页、命名收藏夹（收藏夹_*** 下拉切换+选夹添加+旧数据迁移）
+- [x] 删除功能（会话 4）：收藏夹删除（菜单底部入口+删除模式对话框）；历史目录删除（「仅移除记录」/「删除并清除数据」双选项对话框；`remove_scan_root`+`remove_videos_under`；删监控目录自动停 watcher）
+- [x] 长标题换行修复（会话 4）：根因 = 列宽配置在 setModel 前被 QHeaderView 丢弃，标题列只有 100px；列宽配置移入 setModel 之后 + TitleWrapDelegate 行高自适应 + 50 用例
+- [x] 播放列宽度修复（会话 4）：ResizeToContents 对纯自绘列塌缩到 28px，按钮被挤扁 → PlayButtonDelegate.sizeHint 按文字自适应（73px）+ 52 用例
 - [ ] 多目录同时监控：当前 watcher 只监控最后扫描的目录，其他目录的变更需手动重扫
-- [ ] 删除视频文件功能（当前只有打开所在文件夹）
+- [x] 删除视频文件功能（会话 4 已做「删除并清除数据」的历史目录级删除；单个文件级删除仍缺，当前只有打开所在文件夹）
 - [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
 
 ## 8. 遗留问题（如遇到优先排查）

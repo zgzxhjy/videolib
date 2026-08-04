@@ -14,7 +14,7 @@ class ScanWorker(QThread):
 
     message = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)  # done, total, current filepath
-    done = pyqtSignal(bool)  # True = completed, False = canceled/error
+    done = pyqtSignal(str)  # "ok" | "empty" | "cancel"
 
     def __init__(self, root: str, repo: Repository, parent=None):
         super().__init__(parent)
@@ -26,10 +26,14 @@ class ScanWorker(QThread):
         self._cancel_flag = True
 
     def run(self) -> None:
-        completed = False
+        status = "cancel"
         try:
             self.message.emit(f"正在枚举视频文件... {self._root}")
             files = scan_directory(self._root)
+            if not files:
+                self.message.emit(f"{self._root} 下没有视频文件")
+                status = "empty"
+                return
             self.message.emit(f"发现 {len(files)} 个视频文件，正在比对变化...")
             need_probe, stale = diff_scan(files, self._repo.existing_under(self._root))
             skipped = len(files) - len(need_probe)
@@ -53,8 +57,8 @@ class ScanWorker(QThread):
                 self.message.emit(
                     f"索引完成，库中共 {self._repo.count()} 个视频（清理 {len(stale)} 个失效记录）"
                 )
-                completed = True
+                status = "ok"
         except Exception as e:
             self.message.emit(f"扫描出错: {e}")
         finally:
-            self.done.emit(completed)
+            self.done.emit(status)

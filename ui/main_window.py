@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
     QHeaderView,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -24,6 +25,8 @@ from services.thumbnailer import THUMB_HEIGHT, THUMB_WIDTH, Thumbnailer
 from services.watcher import WatcherThread
 from ui.category_tree import CategoryTree
 from ui.dialogs.pick_category import PickCategoryDialog
+from ui.dialogs.pick_favorite_list import PickFavoriteListDialog, normalize_favorite_name
+from ui.dialogs.pick_scan_root import PickScanRootDialog
 from ui.player import PlayerWindow
 from ui.scan_worker import ScanWorker
 from ui.search_bar import SearchBar
@@ -45,8 +48,9 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self._repo = repo
-        self._view = VIEW_CURRENT
+        self._view = VIEW_ALL
         self._current_root: str | None = None
+        self._favorite_list_id: int | None = None
         self._players: list[PlayerWindow] = []
         self._watcher: WatcherThread | None = None
         self._scanner: ScanWorker | None = None
@@ -61,7 +65,11 @@ class MainWindow(QMainWindow):
         self.table.setModel(self.model)
         self.table.setIconSize(QSize(THUMB_WIDTH, THUMB_HEIGHT))
         self.table.setColumnWidth(COL_THUMB, THUMB_WIDTH)
-        self.table.verticalHeader().setDefaultSectionSize(THUMB_HEIGHT)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for col in (2, 3, 4, 5):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(COL_PLAY, QHeaderView.ResizeMode.ResizeToContents)
         self.model.refresh()
         self.table.selectionModel().selectionChanged.connect(
             lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
@@ -105,10 +113,63 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
-        tb.addAction("收藏夹", lambda: self._set_view(VIEW_FAVORITES))
+        self._favorites_menu = QMenu(self)
+        self._favorites_action = tb.addAction("收藏夹")
+        self._favorites_action.setMenu(self._favorites_menu)
         tb.addAction("所有目录", lambda: self._set_view(VIEW_ALL))
         self.addToolBar(tb)
         self._rebuild_history_menu()
+        self._rebuild_favorites_menu()
+
+    def _rebuild_favorites_menu(self) -> None:
+        self._favorites_menu.clear()
+        for l in self._repo.get_favorite_lists():
+            self._favorites_menu.addAction(
+                f"{l.name} ({self._repo.count_favorites(l.id)})",
+                lambda l=l: self._show_favorite_list(l.id),
+            )
+        self._favorites_menu.addSeparator()
+        self._favorites_menu.addAction("＋ 新建收藏夹...", self._create_favorite_list)
+        if self._repo.get_favorite_lists():
+            self._favorites_menu.addAction("删除收藏夹...", self._delete_favorite_list)
+
+    def _show_favorite_list(self, list_id: int) -> None:
+        self._favorite_list_id = list_id
+        self._set_view(VIEW_FAVORITES)
+        name = next(
+            (l.name for l in self._repo.get_favorite_lists() if l.id == list_id),
+            str(list_id),
+        )
+        self.statusBar().showMessage(f"收藏夹: {name}（{self.model.rowCount()} 个视频）")
+
+    def _create_favorite_list(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "新建收藏夹", "收藏夹名称（自动补前缀「收藏夹_」）:"
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            created = self._repo.create_favorite_list(normalize_favorite_name(name))
+        except ValueError as e:
+            QMessageBox.warning(self, "新建收藏夹", str(e))
+            return
+        self._rebuild_favorites_menu()
+        self._show_favorite_list(created.id)
+
+    def _delete_favorite_list(self) -> None:
+        dialog = PickFavoriteListDialog(
+            self._repo, "删除收藏夹", delete_mode=True, parent=self
+        )
+        dialog.exec()
+        if not dialog.deleted_ids:
+            return
+        self._rebuild_favorites_menu()
+        if self._favorite_list_id in dialog.deleted_ids:
+            self._favorite_list_id = None
+            self._set_view(VIEW_ALL)
+            self.statusBar().showMessage("当前收藏夹已被删除，已切换到所有目录")
+        else:
+            self.statusBar().showMessage(f"已删除 {len(dialog.deleted_ids)} 个收藏夹")
 
     def _rebuild_history_menu(self) -> None:
         self._history_menu.clear()
@@ -116,6 +177,26 @@ class MainWindow(QMainWindow):
         self._history_action.setEnabled(bool(roots))
         for r in roots:
             self._history_menu.addAction(r, lambda r=r: self._start_scan(r))
+        if roots:
+            self._history_menu.addSeparator()
+            self._history_menu.addAction("删除历史记录...", self._delete_scan_roots)
+
+    def _delete_scan_roots(self) -> None:
+        dialog = PickScanRootDialog(self._repo, parent=self)
+        dialog.exec()
+        deleted = dialog.deleted_roots
+        if not deleted:
+            return
+        self._rebuild_history_menu()
+        for root in deleted:
+            if root == config.load_settings().get("watch_root"):
+                if self._watcher is not None:
+                    self._watcher.stop()
+                    self._watcher.wait(3000)
+                    self._watcher = None
+                config.save_setting("watch_root", None)
+        self._refresh_all()
+        self.statusBar().showMessage(f"已删除 {len(deleted)} 个历史目录")
 
     def _build_body(self) -> None:
         self.tree = CategoryTree(self._repo)
@@ -129,15 +210,8 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(THUMB_HEIGHT)
-        self.table.setColumnWidth(COL_THUMB, THUMB_WIDTH)
-        self.table.setColumnWidth(1, 320)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col in (2, 3, 4, 5):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(COL_PLAY, QHeaderView.ResizeMode.ResizeToContents)
         self.table.doubleClicked.connect(lambda idx: self._play(self._video_at(idx)))
         self.table.play_clicked.connect(lambda row: self._play(self.model.video_at(row)))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -180,7 +254,10 @@ class MainWindow(QMainWindow):
         self.search.clear()
         self.tree.clearSelection()
         if view == VIEW_FAVORITES:
-            self.model.refresh_favorites()
+            if self._favorite_list_id is not None:
+                self.model.refresh_favorites(self._favorite_list_id)
+            else:
+                self.model.refresh()
         elif view == VIEW_RECENT:
             self.model.refresh_recent()
         elif view == VIEW_ALL:
@@ -207,6 +284,7 @@ class MainWindow(QMainWindow):
         if not os.path.isdir(root):
             self.statusBar().showMessage(f"目录不存在或未连接: {root}")
             return
+        self._prev_root = self._current_root
         self._activate_root(root)
         self._set_view(VIEW_CURRENT)
         self.statusBar().showMessage(f"正在扫描 {root} ...")
@@ -222,7 +300,7 @@ class MainWindow(QMainWindow):
         worker.progress.connect(
             lambda done, total, fp: self._on_scan_progress(dialog, done, total, fp)
         )
-        worker.done.connect(lambda completed: self._on_scan_done(root, dialog, completed))
+        worker.done.connect(lambda status: self._on_scan_done(root, dialog, status))
         self._scanner = worker
         worker.start()
 
@@ -235,18 +313,27 @@ class MainWindow(QMainWindow):
         dialog.setValue(done)
         dialog.setLabelText(f"已提取元数据 {done}/{total}:\n{os.path.basename(fp)}")
 
-    def _on_scan_done(self, root: str, dialog: QProgressDialog, completed: bool) -> None:
+    def _on_scan_done(self, root: str, dialog: QProgressDialog, status: str) -> None:
         self._scanner = None
         dialog.close()
         dialog.deleteLater()
+        if status == "empty":
+            self._on_scan_empty(root)
+            return
         self._refresh_all()
-        if completed:
+        if status == "ok":
             self._rebuild_history_menu()
             config.save_setting("watch_root", root)
             self._start_watcher(root)
             self.statusBar().showMessage("扫描完成，已开启增量监控")
         else:
             self.statusBar().showMessage("扫描取消/出错，未开启增量监控")
+
+    def _on_scan_empty(self, root: str) -> None:
+        if self._prev_root is not None:
+            self._activate_root(self._prev_root)
+        self._set_view(self._view)
+        QMessageBox.warning(self, "扫描结果", f"该目录下没有视频文件:\n{root}")
 
     def _start_watcher(self, root: str, resume: bool = False) -> None:
         if self._watcher is not None:
@@ -268,7 +355,8 @@ class MainWindow(QMainWindow):
         elif self._view == VIEW_ALL:
             self.model.refresh()
         elif self._view == VIEW_FAVORITES:
-            self.model.refresh_favorites()
+            if self._favorite_list_id is not None:
+                self.model.refresh_favorites(self._favorite_list_id)
         elif self._view == VIEW_RECENT:
             self.model.refresh_recent()
 
@@ -310,10 +398,12 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         menu.addAction("▶ 播放", lambda: self._play(videos[0]))
-        if any(not self._repo.is_favorite(v.id) for v in videos):
-            menu.addAction("☆ 收藏", lambda: self._toggle_favorite(videos, True))
-        if any(self._repo.is_favorite(v.id) for v in videos):
-            menu.addAction("★ 取消收藏", lambda: self._toggle_favorite(videos, False))
+        menu.addAction("☆ 添加到收藏夹...", lambda: self._add_to_favorite(videos))
+        containing = set()
+        for v in videos:
+            containing.update(l.id for l in self._repo.lists_of_video(v.id))
+        if containing:
+            menu.addAction("★ 从收藏夹移除...", lambda: self._remove_from_favorite(videos, containing))
         menu.addSeparator()
         menu.addAction("添加到分类...", lambda: self._assign_category(videos))
         menu.addAction("从分类移除...", lambda: self._unassign_category(videos))
@@ -321,14 +411,29 @@ class MainWindow(QMainWindow):
         menu.addAction("打开所在文件夹", lambda: self._reveal(videos[0]))
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
-    def _toggle_favorite(self, videos: list[Video], favorite: bool) -> None:
-        for v in videos:
-            if favorite:
-                self._repo.add_favorite(v.id)
-            else:
-                self._repo.remove_favorite(v.id)
-        if self._view == VIEW_FAVORITES:
-            self.model.refresh_favorites()
+    def _add_to_favorite(self, videos: list[Video]) -> None:
+        dialog = PickFavoriteListDialog(self._repo, "添加到收藏夹", parent=self)
+        if dialog.exec() and dialog.selected_list_id() is not None:
+            list_id = dialog.selected_list_id()
+            for v in videos:
+                self._repo.add_favorite(v.id, list_id)
+            self._rebuild_favorites_menu()
+            if self._view == VIEW_FAVORITES and self._favorite_list_id == list_id:
+                self.model.refresh_favorites(list_id)
+            self.statusBar().showMessage(f"已将 {len(videos)} 个视频加入收藏夹")
+
+    def _remove_from_favorite(self, videos: list[Video], containing: set[int]) -> None:
+        dialog = PickFavoriteListDialog(
+            self._repo, "从收藏夹移除", video_ids=[v.id for v in videos], parent=self
+        )
+        if dialog.exec() and dialog.selected_list_id() is not None:
+            list_id = dialog.selected_list_id()
+            for v in videos:
+                self._repo.remove_favorite(v.id, list_id)
+            self._rebuild_favorites_menu()
+            if self._view == VIEW_FAVORITES and self._favorite_list_id == list_id:
+                self.model.refresh_favorites(list_id)
+            self.statusBar().showMessage(f"已将 {len(videos)} 个视频移出收藏夹")
 
     def _assign_category(self, videos: list[Video]) -> None:
         if self._current_root is None:

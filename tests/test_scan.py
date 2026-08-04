@@ -224,7 +224,8 @@ def test_scan_worker_keeps_other_root_data(tmp_path):
     va = _make_test_video(root_a / "va.mp4")
     repo.upsert_videos([build_video(str(va))])
     a = repo.get_by_path(str(va))
-    repo.add_favorite(a.id)
+    lst = repo.create_favorite_list("收藏夹_测试")
+    repo.add_favorite(a.id, lst.id)
     cat = repo.add_category("我的分类", root=str(root_a))
     repo.assign_category(a.id, cat.id)
 
@@ -233,7 +234,7 @@ def test_scan_worker_keeps_other_root_data(tmp_path):
     worker.start()
     assert _wait_for(lambda: worker.isFinished()), "scan worker did not finish"
     assert repo.get_by_path(str(va)) is not None, "other root's video was wiped"
-    assert repo.is_favorite(a.id), "favorite was wiped"
+    assert repo.is_favorite(a.id, lst.id), "favorite was wiped"
     assert [c.id for c in repo.categories_of_video(a.id)] == [cat.id], "category was wiped"
     assert repo.get_by_path(str(vb)) is not None
     assert repo.get_categories(str(root_b)) == [], "root B should start with no categories"
@@ -278,4 +279,24 @@ def test_scan_worker_incremental_skips_unchanged(tmp_path, monkeypatch):
     worker.start()
     assert _wait_for(lambda: worker.isFinished())
     assert probe_count["n"] == 3, "only the modified file must be re-probed"
+    repo.close()
+
+
+def test_scan_worker_empty_dir_not_registered(tmp_path):
+    """Scanning a directory with no video files must not touch the DB."""
+    from ui.scan_worker import ScanWorker
+
+    repo = Repository(tmp_path / "db.sqlite")
+    root = tmp_path / "empty"
+    root.mkdir()
+    (root / "notes.txt").write_text("not a video")
+    keep_file = _make_test_video(tmp_path / "other" / "keep.mp4")
+    repo.upsert_videos([build_video(str(keep_file))])
+
+    worker = ScanWorker(str(root), repo)
+    worker.start()
+    assert _wait_for(lambda: worker.isFinished()), "scan worker did not finish"
+    assert repo.get_scan_roots() == [], "empty dir must not be registered"
+    assert repo.get_by_path(str(keep_file)) is not None, "existing data must be untouched"
+    assert repo.count() == 1
     repo.close()

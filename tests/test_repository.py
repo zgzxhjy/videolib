@@ -124,15 +124,75 @@ def test_assign_batch(repo):
     assert len(repo.videos_in_category(cat.id)) == 3
 
 
-def test_favorites(repo):
+def test_favorite_lists_crud(repo):
     repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4")])
     a = repo.get_by_path(r"D:\v\a.mp4")
-    assert not repo.is_favorite(a.id)
-    repo.add_favorite(a.id)
-    assert repo.is_favorite(a.id)
-    assert [v.id for v in repo.get_favorites()] == [a.id]
-    repo.remove_favorite(a.id)
-    assert not repo.is_favorite(a.id)
+    lst = repo.create_favorite_list("收藏夹_动作")
+    assert lst.id > 0
+    with pytest.raises(ValueError):
+        repo.create_favorite_list("收藏夹_动作")
+    repo.rename_favorite_list(lst.id, "收藏夹_动作片")
+    assert repo.get_favorite_lists()[0].name == "收藏夹_动作片"
+
+    assert not repo.is_favorite(a.id, lst.id)
+    repo.add_favorite(a.id, lst.id)
+    assert repo.is_favorite(a.id, lst.id)
+    assert [v.id for v in repo.get_favorites(lst.id)] == [a.id]
+    assert repo.count_favorites(lst.id) == 1
+    assert [l.id for l in repo.lists_of_video(a.id)] == [lst.id]
+
+    repo.remove_favorite(a.id, lst.id)
+    assert not repo.is_favorite(a.id, lst.id)
+    assert repo.get_favorites(lst.id) == []
+
+    repo.add_favorite(a.id, lst.id)
+    repo.delete_favorite_list(lst.id)
+    assert repo.get_favorite_lists() == []
+    assert repo.lists_of_video(a.id) == []
+
+
+def test_favorite_lists_isolated(repo):
+    repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4")])
+    a = repo.get_by_path(r"D:\v\a.mp4")
+    l1 = repo.create_favorite_list("收藏夹_一")
+    l2 = repo.create_favorite_list("收藏夹_二")
+    repo.add_favorite(a.id, l1.id)
+    assert repo.is_favorite(a.id, l1.id)
+    assert not repo.is_favorite(a.id, l2.id)
+    assert repo.count_favorites(l2.id) == 0
+
+
+def test_favorite_list_migration(tmp_path):
+    """Legacy single favorites table must migrate into 收藏夹_默认."""
+    import sqlite3
+
+    db = tmp_path / "old_fav.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE videos (
+            id INTEGER PRIMARY KEY, filename TEXT NOT NULL,
+            filepath TEXT UNIQUE NOT NULL, file_size INTEGER DEFAULT 0,
+            duration REAL, resolution TEXT, codec TEXT, thumb_path TEXT,
+            scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE favorites (
+            video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+    """)
+    conn.execute(
+        "INSERT INTO videos (id, filename, filepath) VALUES (7, 'a.mp4', 'D:/v/a.mp4')"
+    )
+    conn.execute("INSERT INTO favorites (video_id, added_at) VALUES (7, '2026-01-01')")
+    conn.commit()
+    conn.close()
+
+    repo = Repository(db)
+    try:
+        lists = repo.get_favorite_lists()
+        assert [l.name for l in lists] == ["收藏夹_默认"]
+        assert repo.count_favorites(lists[0].id) == 1
+        assert not repo._has_table("favorites")
+    finally:
+        repo.close()
 
 
 def test_play_history_and_resume(repo):
@@ -183,6 +243,30 @@ def test_scan_roots_register_and_list(repo):
     roots = repo.get_scan_roots()
     assert roots[0] == r"D:\a"
     assert set(roots) == {r"D:\a", r"D:\b"}
+
+
+def test_remove_scan_root_keeps_videos(repo):
+    repo.register_scan(r"D:\a")
+    repo.upsert_videos([_mk("a.mp4", r"D:\a\a.mp4")])
+    repo.remove_scan_root(r"D:\a")
+    assert repo.get_scan_roots() == []
+    assert repo.get_by_path(r"D:\a\a.mp4") is not None
+
+
+def test_remove_videos_under(repo):
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\a\a.mp4"),
+        _mk("b.mp4", r"D:\a\sub\b.mp4"),
+        _mk("c.mp4", r"D:\b\c.mp4"),
+    ])
+    a = repo.get_by_path(r"D:\a\a.mp4")
+    lst = repo.create_favorite_list("收藏夹_默认")
+    repo.add_favorite(a.id, lst.id)
+    n = repo.remove_videos_under(r"D:\a")
+    assert n == 2
+    assert repo.get_by_path(r"D:\a\a.mp4") is None
+    assert repo.get_by_path(r"D:\b\c.mp4") is not None
+    assert repo.count_favorites(lst.id) == 0, "favorite links must cascade"
 
 
 def test_category_root_scoping(repo):

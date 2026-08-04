@@ -4,14 +4,18 @@ from pathlib import Path
 from PyQt6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
+    QRect,
     QRunnable,
+    QSize,
     QThreadPool,
+    QTimer,
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QHeaderView,
     QStyledItemDelegate,
     QStyle,
     QTableView,
@@ -23,6 +27,7 @@ from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
 
 COL_THUMB = 0
 COL_PLAY = 6
+COL_TITLE = 1
 
 
 class ThumbRunnable(QRunnable):
@@ -45,10 +50,16 @@ class ThumbRunnable(QRunnable):
 class PlayButtonDelegate(QStyledItemDelegate):
     """Draws a clickable 'play' button inside the play column."""
 
+    BUTTON_TEXT = "▶ 播放"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hover_row: int | None = None
         self._press_row: int | None = None
+
+    def sizeHint(self, option, index):
+        fm = QFontMetrics(option.font)
+        return QSize(fm.horizontalAdvance(self.BUTTON_TEXT) + 24, fm.height() + 20)
 
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
@@ -69,8 +80,27 @@ class PlayButtonDelegate(QStyledItemDelegate):
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, 6, 6)
         painter.setPen(fg)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "▶ 播放")
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.BUTTON_TEXT)
         painter.restore()
+
+
+class TitleWrapDelegate(QStyledItemDelegate):
+    """Wraps long titles. sizeHint uses the real column width so tall rows grow."""
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        height = max(base.height(), THUMB_HEIGHT)
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        width = option.rect.width() - 8
+        if text and width > 0:
+            fm = QFontMetrics(option.font)
+            wrapped = fm.boundingRect(
+                QRect(0, 0, width, 10**6),
+                int(Qt.TextFlag.TextWordWrap),
+                text,
+            ).height()
+            height = max(height, wrapped)
+        return QSize(base.width(), height)
 
 
 class PlayTableView(QTableView):
@@ -81,6 +111,7 @@ class PlayTableView(QTableView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._delegate = PlayButtonDelegate(self)
+        self._title_delegate = TitleWrapDelegate(self)
         self._hover_row: int | None = None
         self._press_row: int | None = None
         self.setMouseTracking(True)
@@ -88,6 +119,16 @@ class PlayTableView(QTableView):
     def setModel(self, model) -> None:
         super().setModel(model)
         self.setItemDelegateForColumn(COL_PLAY, self._delegate)
+        self.setItemDelegateForColumn(COL_TITLE, self._title_delegate)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        model.modelReset.connect(self._refresh_row_heights)
+        self.horizontalHeader().sectionResized.connect(self._schedule_row_heights)
+
+    def _refresh_row_heights(self) -> None:
+        self.verticalHeader().resizeSections(QHeaderView.ResizeMode.ResizeToContents)
+
+    def _schedule_row_heights(self) -> None:
+        QTimer.singleShot(0, self._refresh_row_heights)
 
     def _play_row_at(self, pos) -> int:
         idx = self.indexAt(pos)
@@ -171,8 +212,8 @@ class VideoTableModel(QAbstractTableModel):
             videos = self._repo.videos_in_root(root)
         self.set_videos(videos)
 
-    def refresh_favorites(self) -> None:
-        self.set_videos(self._repo.get_favorites())
+    def refresh_favorites(self, list_id: int) -> None:
+        self.set_videos(self._repo.get_favorites(list_id))
 
     def refresh_recent(self) -> None:
         self.set_videos([v for _rec, v in self._repo.recent_plays(limit=200)])

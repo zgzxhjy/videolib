@@ -25,6 +25,13 @@ class Category:
 
 
 @dataclass
+class FavoriteList:
+    id: int = 0
+    name: str = ""
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
 class PlayRecord:
     id: int = 0
     video_id: int = 0
