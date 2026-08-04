@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-04（会话 2 结束）
+> 最后更新：2026-08-04（会话 3 结束）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,8 +9,8 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，25 个用例全绿
-- git：9 个提交，工作区干净，分支 master
+- 测试：pytest，27 个用例全绿
+- git：10 个提交，工作区干净，分支 master
 
 ## 2. 已实现功能（全部可用）
 
@@ -26,6 +26,7 @@
 | 列表 | 虚拟滚动，行内「▶ 播放」按钮列（hover/press 反馈），工具栏播放按钮，Enter/Space 快捷键，双击/右键播放 |
 | 批量操作 | 批量收藏、批量加/移分类 |
 | 其他 | 打开所在文件夹（explorer /select）、状态栏提示 |
+| 扫描进度 | 非模态 QProgressDialog（WindowModal）：枚举阶段忙碌态→元数据阶段 i/n 进度+当前文件名，可取消（保留已处理部分、跳过 stale 清理），扫描期间防重入 |
 
 ## 3. 目录结构
 
@@ -90,7 +91,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [ ] 播放内核备选：QMediaPlayer 格式覆盖有限，`ui/player.py` 已预留替换点，可换 mpv（python-mpv）
 - [ ] HiDPI：缩略图 2x 生成（340x192）+ QIcon dpr，当前高分屏略糊
 - [ ] 中文搜索优化：拼音首字母索引或 jieba 分词
-- [ ] 扫描进度 UI：目前仅状态栏文本
+- [x] 扫描进度 UI：QProgressDialog + 取消（会话 3），ScanWorker 增加 `progress(done,total,fp)` / `done(bool)` / `cancel()`
 - [ ] 删除视频文件功能（当前只有打开所在文件夹）
 - [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
 

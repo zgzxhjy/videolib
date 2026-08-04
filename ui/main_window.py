@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QToolBar,
     QVBoxLayout,
@@ -171,19 +172,45 @@ class MainWindow(QMainWindow):
         self._start_scan(root)
 
     def _start_scan(self, root: str) -> None:
+        if self._scanner is not None:
+            return
         self.statusBar().showMessage(f"正在扫描 {root} ...")
+        dialog = QProgressDialog("正在枚举视频文件...", "取消扫描", 0, 0, self)
+        dialog.setWindowTitle("扫描进度")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(self._cancel_scan)
+        dialog.show()
         worker = ScanWorker(root, self._repo, self)
         worker.message.connect(self.statusBar().showMessage)
-        worker.done.connect(lambda: self._on_scan_done(root))
+        worker.progress.connect(
+            lambda done, total, fp: self._on_scan_progress(dialog, done, total, fp)
+        )
+        worker.done.connect(lambda completed: self._on_scan_done(root, dialog, completed))
         self._scanner = worker
         worker.start()
 
-    def _on_scan_done(self, root: str) -> None:
+    def _cancel_scan(self) -> None:
+        if self._scanner is not None:
+            self._scanner.cancel()
+
+    def _on_scan_progress(self, dialog: QProgressDialog, done: int, total: int, fp: str) -> None:
+        dialog.setRange(0, total)
+        dialog.setValue(done)
+        dialog.setLabelText(f"已提取元数据 {done}/{total}:\n{os.path.basename(fp)}")
+
+    def _on_scan_done(self, root: str, dialog: QProgressDialog, completed: bool) -> None:
         self._scanner = None
+        dialog.close()
+        dialog.deleteLater()
         self._refresh_all()
-        config.save_setting("watch_root", root)
-        self._start_watcher(root)
-        self.statusBar().showMessage("扫描完成，已开启增量监控")
+        if completed:
+            config.save_setting("watch_root", root)
+            self._start_watcher(root)
+            self.statusBar().showMessage("扫描完成，已开启增量监控")
+        else:
+            self.statusBar().showMessage("扫描取消/出错，未开启增量监控")
 
     def _start_watcher(self, root: str, resume: bool = False) -> None:
         if self._watcher is not None:

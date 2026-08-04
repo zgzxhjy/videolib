@@ -127,3 +127,60 @@ def test_thumbnail_no_repeat_work(video_dir, tmp_path):
     thumbs = Thumbnailer(tmp_path / "thumbs")
     assert thumbs.ensure(str(video_dir), 1) is True
     assert thumbs.ensure(str(video_dir), 1) is True
+
+
+def _wait_for(condition, timeout=20.0, interval=0.05):
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def test_scan_worker_completes_and_cleans_stale(tmp_path):
+    from ui.scan_worker import ScanWorker
+
+    repo = Repository(tmp_path / "db.sqlite")
+    stale_file = _make_test_video(tmp_path / "old" / "old.mp4")
+    repo.upsert_videos([build_video(str(stale_file))])
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(2):
+        _make_test_video(root / f"v{i}.mp4")
+    worker = ScanWorker(str(root), repo)
+    worker.start()
+    assert _wait_for(lambda: worker.isFinished()), "scan worker did not finish"
+    assert repo.count() == 2
+    assert repo.get_by_path(str(stale_file)) is None
+    repo.close()
+
+
+def test_scan_worker_cancel_keeps_stale(tmp_path, monkeypatch):
+    import time
+
+    from ui.scan_worker import ScanWorker
+
+    repo = Repository(tmp_path / "db.sqlite")
+    stale_file = _make_test_video(tmp_path / "old" / "old.mp4")
+    repo.upsert_videos([build_video(str(stale_file))])
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(20):
+        _make_test_video(root / f"v{i}.mp4")
+
+    def slow_build(fp):
+        time.sleep(0.1)
+        return build_video(fp)
+
+    monkeypatch.setattr("ui.scan_worker.build_video", slow_build)
+    worker = ScanWorker(str(root), repo)
+    worker.start()
+    time.sleep(0.3)
+    worker.cancel()
+    assert _wait_for(lambda: worker.isFinished()), "canceled worker did not stop"
+    assert repo.get_by_path(str(stale_file)) is not None, "cancel must not remove stale rows"
+    assert repo.count() < 21, "cancel did not stop processing"
+    repo.close()
