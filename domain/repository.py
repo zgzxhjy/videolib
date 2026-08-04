@@ -167,6 +167,13 @@ class Repository:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) AS c FROM videos").fetchone()["c"]
 
+    def all_videos(self, limit: int = 500) -> list[Video]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM videos ORDER BY filename LIMIT ?", (limit,)
+            ).fetchall()
+            return [_row_to_video(r) for r in rows]
+
     # ---------- search ----------
 
     def search(self, query: str, limit: int = 500) -> list[Video]:

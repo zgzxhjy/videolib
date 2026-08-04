@@ -1,16 +1,24 @@
-from pathlib import Path
+import sys
+
+from PyQt6.QtWidgets import QApplication
 
 import config
 from domain.repository import Repository
+from ui.main_window import MainWindow
 
 
-def main() -> None:
+def main() -> int:
     config.APP_DIR.mkdir(parents=True, exist_ok=True)
     config.THUMBS_DIR.mkdir(parents=True, exist_ok=True)
     repo = Repository(config.DB_PATH)
-    print(f"VideoLib ready. Database: {config.DB_PATH}  Videos indexed: {repo.count()}")
+    app = QApplication(sys.argv)
+    app.setApplicationName(config.APP_NAME)
+    window = MainWindow(repo)
+    window.show()
+    exit_code = app.exec()
     repo.close()
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
