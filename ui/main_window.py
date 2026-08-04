@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 import config
 from domain.models import Video
 from domain.repository import Repository
+from services.watcher import WatcherThread
 from ui.category_tree import CategoryTree
 from ui.dialogs.pick_category import PickCategoryDialog
 from ui.player import PlayerWindow
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         self._repo = repo
         self._view = VIEW_ALL
         self._players: list[PlayerWindow] = []
+        self._watcher: WatcherThread | None = None
         self.setWindowTitle(f"{config.APP_NAME} - 视频管理")
         self.resize(1100, 700)
 
@@ -47,6 +49,16 @@ class MainWindow(QMainWindow):
         self.model = VideoTableModel(repo, config.THUMBS_DIR)
         self.table.setModel(self.model)
         self.model.refresh()
+
+        root = config.load_settings().get("watch_root")
+        if root and os.path.isdir(root):
+            self._start_watcher(root, resume=True)
+
+    def closeEvent(self, event) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher.wait(3000)
+        super().closeEvent(event)
 
     # ---------- UI construction ----------
 
@@ -138,12 +150,30 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"正在扫描 {root} ...")
         worker = ScanWorker(root, self._repo)
         worker.message.connect(self.statusBar().showMessage)
-        worker.done.connect(self._on_scan_done)
+        worker.done.connect(lambda: self._on_scan_done(root))
         worker.start()
 
-    def _on_scan_done(self) -> None:
+    def _on_scan_done(self, root: str) -> None:
         self._refresh_all()
-        self.statusBar().showMessage("扫描完成")
+        config.save_setting("watch_root", root)
+        self._start_watcher(root)
+        self.statusBar().showMessage("扫描完成，已开启增量监控")
+
+    def _start_watcher(self, root: str, resume: bool = False) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher.wait(3000)
+        watcher = WatcherThread(root, self._repo)
+        watcher.message.connect(self.statusBar().showMessage)
+        watcher.changed.connect(self._on_watch_changed)
+        self._watcher = watcher
+        watcher.start()
+        if resume:
+            self.statusBar().showMessage(f"已恢复监控: {root}")
+
+    def _on_watch_changed(self) -> None:
+        if self._view == VIEW_ALL and not self.search.text():
+            self.model.refresh()
 
     def _on_search(self, text: str) -> None:
         self._view = VIEW_ALL
