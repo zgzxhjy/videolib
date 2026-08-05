@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-from PyQt6.QtCore import QSize, Qt, QThread, QTimer
+from PyQt6.QtCore import QByteArray, QFile, QSize, Qt, QThread, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 import config
 from domain.models import Video
 from domain.repository import Repository
+from services.library import Library
 from services.thumbnailer import THUMB_HEIGHT, THUMB_WIDTH, Thumbnailer
 from services.watcher import WatcherThread
 from ui.category_tree import CategoryTree
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         self._players: list[PlayerWindow] = []
         self._watcher: WatcherThread | None = None
         self._scanner: ScanWorker | None = None
+        self._cleanup_thread: _OrphanCleanupThread | None = None
         self.setWindowTitle(f"{config.APP_NAME} - 视频管理")
         self.resize(1100, 700)
 
@@ -86,6 +88,7 @@ class MainWindow(QMainWindow):
         for col in (2, 3, 4, 5):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_PLAY, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSortingEnabled(True)
         self._count_label = QLabel("共 0 个视频")
         self.statusBar().addPermanentWidget(self._count_label)
         self.model.modelReset.connect(self._update_count_label)
@@ -94,6 +97,7 @@ class MainWindow(QMainWindow):
             lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
         )
         self._setup_shortcuts()
+        self._restore_ui_state()
 
         # Parented single-shot timer: a bare QTimer.singleShot(0, ...) would
         # still fire after the window is destroyed and call a slot on a dead
@@ -110,6 +114,54 @@ class MainWindow(QMainWindow):
 
     def _update_count_label(self) -> None:
         self._count_label.setText(f"共 {self.model.rowCount():,} 个视频")
+
+    # ---------- window state persistence ----------
+
+    def _restore_ui_state(self) -> None:
+        """Restore geometry and column widths (must run after setModel)."""
+        settings = config.load_settings()
+        geo = settings.get("window_geometry")
+        if isinstance(geo, str) and geo:
+            self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
+        widths = settings.get("column_widths")
+        if isinstance(widths, list) and len(widths) == 7:
+            header = self.table.horizontalHeader()
+            for col, width in enumerate(widths):
+                # Stretch/ResizeToContents columns are sized by layout or
+                # content; only Interactive columns carry a stored width that
+                # survives a relayout pass.
+                if (
+                    isinstance(width, int)
+                    and width > 0
+                    and header.sectionResizeMode(col) == QHeaderView.ResizeMode.Interactive
+                ):
+                    self.table.setColumnWidth(col, width)
+        sort_col = settings.get("sort_column")
+        sort_order = settings.get("sort_order")
+        if (
+            isinstance(sort_col, int)
+            and sort_col in (1, 2, 3, 4, 5)
+            and sort_order in (0, 1)
+        ):
+            self.table.horizontalHeader().setSortIndicator(
+                sort_col, Qt.SortOrder(sort_order)
+            )
+            self.model.sort(sort_col, Qt.SortOrder(sort_order))
+
+    def _save_ui_state(self) -> None:
+        config.save_setting(
+            "window_geometry",
+            bytes(self.saveGeometry().toBase64()).decode("ascii"),
+        )
+        config.save_setting(
+            "column_widths",
+            [self.table.columnWidth(c) for c in range(7)],
+        )
+        config.save_setting("sort_column", self.table.horizontalHeader().sortIndicatorSection())
+        config.save_setting(
+            "sort_order",
+            self.table.horizontalHeader().sortIndicatorOrder().value,
+        )
 
     def _start_orphan_cleanup(self) -> None:
         self._cleanup_thread = _OrphanCleanupThread(self._repo, self)
@@ -134,7 +186,21 @@ class MainWindow(QMainWindow):
         self._repo.adopt_legacy_categories(root)
         self.tree.reload(root)
 
+    def _stop_orphan_cleanup(self) -> None:
+        """Cancel a pending cleanup start and drain a running cleanup thread.
+
+        Without this, a closed window keeps a pending 0ms timer alive through
+        the QTimer→parent wrapper reference cycle; the timer can then fire on a
+        later event-loop iteration and start a thread against a dead repo.
+        """
+        self._cleanup_timer.stop()
+        if self._cleanup_thread is not None and self._cleanup_thread.isRunning():
+            self._cleanup_thread.wait(3000)
+            self._cleanup_thread = None
+
     def closeEvent(self, event) -> None:
+        self._save_ui_state()
+        self._stop_orphan_cleanup()
         self._stop_watcher()
         super().closeEvent(event)
 
@@ -404,7 +470,7 @@ class MainWindow(QMainWindow):
             if video is not None:
                 QMessageBox.warning(self, "文件不存在", f"文件不存在:\n{video.filepath}")
             return
-        player = PlayerWindow(video, self._repo)
+        player = PlayerWindow(video, self._repo, queue=self.model.all_videos())
         player.finished.connect(self._on_player_closed)
         self._players.append(player)
         player.show()
@@ -446,7 +512,54 @@ class MainWindow(QMainWindow):
         menu.addAction("从分类移除...", lambda: self._unassign_category(videos))
         menu.addSeparator()
         menu.addAction("打开所在文件夹", lambda: self._reveal(videos[0]))
+        menu.addSeparator()
+        menu.addAction("从库中移除", lambda: self._remove_from_library(videos))
+        menu.addAction("删除文件并移入回收站...", lambda: self._delete_files(videos))
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _remove_from_library(self, videos: list[Video]) -> None:
+        """Drop the rows (and thumbnails) but keep the files on disk."""
+        if not self._confirm_delete(videos, delete_files=False):
+            return
+        Library(self._repo).remove_paths([v.filepath for v in videos])
+        self._after_videos_deleted(len(videos), "已从库中移除")
+
+    def _delete_files(self, videos: list[Video]) -> None:
+        """Move the files to the recycle bin, then drop the rows."""
+        if not self._confirm_delete(videos, delete_files=True):
+            return
+        paths = [v.filepath for v in videos]
+        failed = [p for p in paths if not QFile.moveToTrash(p)]
+        Library(self._repo).remove_paths(paths)
+        self._after_videos_deleted(len(videos), "已删除")
+        if failed:
+            self.statusBar().showMessage(
+                f"已删除 {len(videos) - len(failed)} 个视频；"
+                f"{len(failed)} 个文件未能移入回收站（库记录已清理）"
+            )
+
+    def _confirm_delete(self, videos: list[Video], delete_files: bool) -> bool:
+        if len(videos) == 1:
+            names = videos[0].filename
+        else:
+            names = "、".join(v.filename for v in videos[:3])
+            if len(videos) > 3:
+                names += f" 等 {len(videos)} 个"
+        if delete_files:
+            text = f"确定删除「{names}」？\n视频文件将移入回收站，库记录和缩略图同时清除。"
+        else:
+            text = f"确定将「{names}」从库中移除？\n文件保留在磁盘上，收藏/分类关联同时清除。"
+        reply = QMessageBox.warning(
+            self, "删除视频", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _after_videos_deleted(self, count: int, verb: str) -> None:
+        self._rebuild_favorites_menu()
+        self.model.show(self._view, **self._view_ctx())
+        self.statusBar().showMessage(f"{verb} {count} 个视频")
 
     def _add_to_favorite(self, videos: list[Video]) -> None:
         dialog = PickFavoriteListDialog(self._repo, "添加到收藏夹", parent=self)

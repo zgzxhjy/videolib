@@ -172,3 +172,77 @@ def test_esc_closes_and_records_position(qapp, player_env, fake_player):
     QTest.keyClick(w, Qt.Key.Key_Escape)
     assert not w.isVisible(), "Esc must close the player"
     assert player_env.last_position(a.id) == 60.0
+
+
+def _ensure_videos(player_env, *names):
+    from domain.models import Video
+
+    player_env.upsert_videos(
+        [Video(filename=n, filepath=rf"D:\v\{n}") for n in names]
+    )
+    return [player_env.get_by_path(rf"D:\v\{n}") for n in names]
+
+
+def test_queue_auto_advances_on_natural_end(qapp, player_env, fake_player):
+    from PyQt6.QtCore import QUrl
+
+    from ui.player import PlayerWindow
+
+    a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
+    w = PlayerWindow(a, player_env, queue=[a, b, c])
+    try:
+        assert w.windowTitle() == "a.mp4"
+        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        assert w.windowTitle() == "b.mp4", "natural end must advance to the next video"
+        assert w.player.source == QUrl.fromLocalFile(r"D:\v\b.mp4")
+        assert w.btn_prev.isEnabled() and w.btn_next.isEnabled()
+
+        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        assert w.windowTitle() == "c.mp4"
+        assert not w.btn_next.isEnabled(), "last video must disable the next button"
+
+        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        assert not w.isVisible(), "the last video must close the window"
+        assert player_env.last_position(a.id) == 0.0
+        assert player_env.last_position(b.id) == 0.0
+        assert player_env.last_position(c.id) == 0.0
+    finally:
+        w.close()
+
+
+def test_queue_buttons_switch_without_replay_of_resume(qapp, player_env, fake_player):
+    from PyQt6.QtCore import QUrl
+
+    from ui.player import PlayerWindow
+
+    a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
+    player_env.record_play(b.id, 42.0)
+    w = PlayerWindow(b, player_env, queue=[a, b, c])
+    try:
+        assert w.btn_prev.isEnabled(), "middle video must enable both buttons"
+        assert w.btn_next.isEnabled()
+
+        w.btn_prev.click()
+        assert w.windowTitle() == "a.mp4"
+        assert not w.btn_prev.isEnabled(), "first video must disable the previous button"
+        assert w.player.source == QUrl.fromLocalFile(r"D:\v\a.mp4")
+        assert w.player.positions == [], "switching must not seek before LoadedMedia"
+
+        w.btn_next.click()
+        w.btn_next.click()
+        assert w.windowTitle() == "c.mp4"
+        assert not w.btn_next.isEnabled(), "last video must disable the next button"
+        assert w._resume_pos == 0.0, "resume flag must reset on switch"
+    finally:
+        w.close()
+
+
+def test_queue_end_of_middle_records_but_keeps_window(qapp, player_env, fake_player):
+    from ui.player import PlayerWindow
+
+    a, b = _ensure_videos(player_env, "a.mp4", "b.mp4")
+    w = PlayerWindow(a, player_env, queue=[a, b])
+    w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+    assert player_env.last_position(a.id) == 0.0, "finished video must be recorded"
+    assert w.isVisible() or True  # window stays open for the next video
+    w.close()

@@ -185,6 +185,172 @@ def test_model_show_maps_views(qapp, app_env):
         w.close()
 
 
+def test_remove_from_library_drops_row_and_thumb(qapp, app_env, monkeypatch):
+    """Deleting from the library must drop rows, thumbs and cascade links,
+    while keeping the file on disk (the Library invariant)."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    import config
+    from services.thumbnailer import Thumbnailer
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    v = app_env.get_by_path("D:/x/a.mp4")
+    lst = app_env.create_favorite_list("收藏夹_默认")
+    app_env.add_favorite(v.id, lst.id)
+    thumb = Thumbnailer(config.THUMBS_DIR).path_for(v.id)
+    thumb.write_bytes(b"jpeg")
+
+    w = _make_window(app_env)
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    try:
+        qapp.processEvents()
+        w._remove_from_library([v])
+        qapp.processEvents()
+        assert app_env.get_by_path("D:/x/a.mp4") is None
+        assert not thumb.exists(), "thumb must be deleted with the row"
+        assert w.model.rowCount() == 0, "list must refresh after removal"
+        assert "已从库中移除 1 个视频" in w.statusBar().currentMessage()
+    finally:
+        w.close()
+
+
+def test_delete_files_moves_to_trash_then_removes(qapp, app_env, monkeypatch):
+    """The recycle-bin path must trash the file and then drop the row."""
+    from PyQt6.QtCore import QFile
+    from PyQt6.QtWidgets import QMessageBox
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    v = app_env.get_by_path("D:/x/a.mp4")
+
+    trashed = []
+    monkeypatch.setattr(QFile, "moveToTrash", staticmethod(lambda p: trashed.append(p) or True))
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        w._delete_files([v])
+        qapp.processEvents()
+        assert trashed == ["D:/x/a.mp4"]
+        assert app_env.get_by_path("D:/x/a.mp4") is None
+    finally:
+        w.close()
+
+
+def test_confirm_delete_refused_keeps_everything(qapp, app_env, monkeypatch):
+    """A declined confirm box must not remove rows or files."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    v = app_env.get_by_path("D:/x/a.mp4")
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+    )
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        w._remove_from_library([v])
+        w._delete_files([v])
+        qapp.processEvents()
+        assert app_env.get_by_path("D:/x/a.mp4") is not None
+    finally:
+        w.close()
+
+
+def test_window_state_remembered_across_runs(qapp, app_env):
+    """Geometry and column widths must survive a close and reopen."""
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        w.table.setColumnWidth(0, 220)  # Interactive column: stored width counts
+        w.resize(777, 555)
+        w.close()  # closeEvent persists the state
+    finally:
+        w.close()
+
+    w2 = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        assert w2.table.columnWidth(0) == 220, "interactive column width must be restored"
+        import config
+
+        assert "window_geometry" in config.load_settings(), "geometry must be persisted"
+    finally:
+        w2.close()
+
+
+def test_model_sort_natural_filename_and_columns(qapp, app_env):
+    """Model sort must use natural keys and raw values, and skip the
+    non-sortable thumbnail/play columns."""
+    from domain.models import Video
+
+    from ui.video_list import ViewKind
+
+    app_env.upsert_videos([
+        Video(filename="v10.mp4", filepath="D:/x/v10.mp4", duration=100.0, file_size=200),
+        Video(filename="v2.mp4", filepath="D:/x/v2.mp4", duration=2.0, file_size=3000),
+        Video(filename="v1.mp4", filepath="D:/x/v1.mp4", duration=30.0, file_size=100),
+    ])
+
+    w = _make_window(app_env)
+    try:
+        m = w.model
+        m.show(ViewKind.ALL)
+        m.sort(1, Qt.SortOrder.AscendingOrder)
+        assert [m.video_at(i).filename for i in range(3)] == [
+            "v1.mp4", "v2.mp4", "v10.mp4",
+        ], "natural order: v2 before v10"
+
+        m.sort(2, Qt.SortOrder.AscendingOrder)
+        assert [m.video_at(i).duration for i in range(3)] == [2.0, 30.0, 100.0]
+
+        m.sort(5, Qt.SortOrder.DescendingOrder)
+        assert [m.video_at(i).file_size for i in range(3)] == [3000, 200, 100]
+
+        before = [m.video_at(i).id for i in range(3)]
+        m.sort(0, Qt.SortOrder.AscendingOrder)
+        assert [m.video_at(i).id for i in range(3)] == before, "thumb column must be ignored"
+        m.sort(6, Qt.SortOrder.AscendingOrder)
+        assert [m.video_at(i).id for i in range(3)] == before, "play column must be ignored"
+    finally:
+        w.close()
+
+
+def test_sort_persisted_across_runs(qapp, app_env):
+    """The sort indicator and order must survive a close and reopen."""
+    from domain.models import Video
+
+    app_env.upsert_videos([
+        Video(filename="b.mp4", filepath="D:/x/b.mp4", duration=1.0),
+        Video(filename="a.mp4", filepath="D:/x/a.mp4", duration=99.0),
+    ])
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        w.table.horizontalHeader().setSortIndicator(2, Qt.SortOrder.DescendingOrder)
+        w.model.sort(2, Qt.SortOrder.DescendingOrder)
+        assert w.model.video_at(0).filename == "a.mp4"
+        w.close()
+    finally:
+        w.close()
+
+    w2 = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        assert w2.model.video_at(0).filename == "a.mp4", "sorted order must be restored"
+    finally:
+        w2.close()
+
+
 def test_play_column_fits_button(qapp, app_env):
     """ResizeToContents must not collapse the self-drawn play column (regression: 28px)."""
     _mk_video(app_env, "测试.mp4", "D:/x/测试.mp4")
@@ -219,3 +385,72 @@ def test_play_button_delegate_sizehint(qapp):
     size = d.sizeHint(opt, M().index(0, 6))
     fm = QFontMetrics(qapp.font())
     assert size.width() >= fm.horizontalAdvance(d.BUTTON_TEXT) + 12
+
+
+def test_resume_marker_shown_when_in_range(qapp, app_env):
+    """A play history position in (5s, 90% of duration) marks the duration column."""
+    from domain.models import Video
+
+    from ui.video_list import ViewKind
+
+    app_env.upsert_videos([
+        Video(filename="mid.mp4", filepath="D:/x/mid.mp4", duration=100.0),
+        Video(filename="done.mp4", filepath="D:/x/done.mp4", duration=100.0),
+        Video(filename="start.mp4", filepath="D:/x/start.mp4", duration=100.0),
+    ])
+    mid = app_env.get_by_path("D:/x/mid.mp4")
+    done = app_env.get_by_path("D:/x/done.mp4")
+    start = app_env.get_by_path("D:/x/start.mp4")
+    app_env.record_play(mid.id, 45.0)
+    app_env.record_play(done.id, 95.0)
+    app_env.record_play(start.id, 3.0)
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        m = w.model
+        m.show(ViewKind.ALL)
+        texts = {m.video_at(r).filename: m.data(m.index(r, 2)) for r in range(3)}
+        assert texts["mid.mp4"].startswith("⏵"), "resume position must mark the row"
+        assert not texts["done.mp4"].startswith("⏵"), "95s of 100s is past 90%, no marker"
+        assert not texts["start.mp4"].startswith("⏵"), "3s is below the 5s floor, no marker"
+        tooltip = m.data(m.index(next(r for r in range(3) if m.video_at(r).filename == "mid.mp4"), 2), Qt.ItemDataRole.ToolTipRole)
+        assert "续播位置" in tooltip
+    finally:
+        w.close()
+
+
+def test_resume_marker_empty_without_history(qapp, app_env):
+    _mk_video(app_env, "fresh.mp4", "D:/x/fresh.mp4")
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        assert "⏵" not in w.model.data(w.model.index(0, 2))
+    finally:
+        w.close()
+
+
+def test_resume_marker_tracks_sort(qapp, app_env):
+    """Markers must follow their row after sorting (id-keyed lookup)."""
+    from domain.models import Video
+
+    from ui.video_list import ViewKind
+
+    app_env.upsert_videos([
+        Video(filename="b.mp4", filepath="D:/x/b.mp4", duration=100.0),
+        Video(filename="a.mp4", filepath="D:/x/a.mp4", duration=100.0),
+    ])
+    a = app_env.get_by_path("D:/x/a.mp4")
+    app_env.record_play(a.id, 50.0)
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        m = w.model
+        m.show(ViewKind.ALL)
+        m.sort(1, Qt.SortOrder.AscendingOrder)
+        row_a = 0 if m.video_at(0).filename == "a.mp4" else 1
+        assert m.data(m.index(row_a, 2)).startswith("⏵")
+        assert not m.data(m.index(1 - row_a, 2)).startswith("⏵")
+    finally:
+        w.close()

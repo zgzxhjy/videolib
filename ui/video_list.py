@@ -1,3 +1,4 @@
+import re
 import threading
 from enum import StrEnum
 from pathlib import Path
@@ -35,6 +36,14 @@ class ViewKind(StrEnum):
     ALL = "all"
     FAVORITES = "favorites"
     RECENT = "recent"
+
+
+def _natkey(text: str) -> list:
+    """Natural sort key: 'v2' < 'v10', case-insensitive."""
+    return [
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", text)
+    ]
 
 
 class ThumbRunnable(QRunnable):
@@ -170,6 +179,7 @@ class VideoTableModel(QAbstractTableModel):
         self._thumbs_dir = thumbs_dir
         self._videos: list[Video] = []
         self._id_to_row: dict[int, int] = {}
+        self._resume_positions: dict[int, float] = {}
         self._scanning = False
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(4)
@@ -183,6 +193,7 @@ class VideoTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._videos = videos
         self._id_to_row = {v.id: i for i, v in enumerate(videos)}
+        self._resume_positions = self._repo.last_positions([v.id for v in videos])
         self._requested.clear()
         self.endResetModel()
 
@@ -221,6 +232,42 @@ class VideoTableModel(QAbstractTableModel):
             videos = self._repo.all_videos()
         self.set_videos(videos)
 
+    def sort(self, column: int, order: Qt.SortOrder) -> None:
+        """In-memory sort on the loaded view; thumbnails and play columns
+        (columns 0/6) are not sortable. Keyed on raw values, not display text.
+
+        Reorders via layoutChanged, never beginResetModel: a reset inside
+        sort() makes QTableView (sortingEnabled) re-enter sort() from its own
+        reset handling, recursing until the stack overflows.
+        """
+        if column == 1:
+            key = lambda v: _natkey(v.filename)
+        elif column == 2:
+            key = lambda v: v.duration if v.duration is not None else -1.0
+        elif column == 3:
+            key = lambda v: _natkey(v.resolution or "")
+        elif column == 4:
+            key = lambda v: _natkey(v.codec or "")
+        elif column == 5:
+            key = lambda v: v.file_size or 0
+        else:
+            return
+        old = self._videos
+        videos = sorted(
+            old,
+            key=key,
+            reverse=order == Qt.SortOrder.DescendingOrder,
+        )
+        new_rows = {v.id: i for i, v in enumerate(videos)}
+        self.layoutAboutToBeChanged.emit()
+        self._videos = videos
+        self._id_to_row = new_rows
+        for idx in self.persistentIndexList():
+            self.changePersistentIndex(
+                idx, self.index(new_rows[old[idx.row()].id], idx.column())
+            )
+        self.layoutChanged.emit()
+
     def all_videos(self) -> list[Video]:
         return self._videos
 
@@ -253,7 +300,11 @@ class VideoTableModel(QAbstractTableModel):
             if col == 1:
                 return v.filename
             if col == 2:
-                return _fmt_duration(v.duration)
+                text = _fmt_duration(v.duration)
+                pos = self._resume_positions.get(v.id)
+                if pos and v.duration and 5 < pos < v.duration * 0.9:
+                    text = f"⏵ {text}"
+                return text
             if col == 3:
                 return v.resolution or ""
             if col == 4:
@@ -263,6 +314,9 @@ class VideoTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DecorationRole and col == COL_THUMB:
             return self._load_thumb(v)
         if role == Qt.ItemDataRole.ToolTipRole:
+            pos = self._resume_positions.get(v.id)
+            if col == 2 and pos and v.duration and 5 < pos < v.duration * 0.9:
+                return f"{v.filepath}\n续播位置 {_fmt_duration(pos)}"
             return v.filepath
         if role == Qt.ItemDataRole.UserRole:
             return v

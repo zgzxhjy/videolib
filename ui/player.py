@@ -28,15 +28,23 @@ class PlayerWindow(QWidget):
     SEEK_STEP_S = 5
     VOL_STEP = 5
 
-    def __init__(self, video: Video, repo: Repository, parent=None):
+    def __init__(self, video: Video, repo: Repository, queue: list[Video] | None = None, parent=None):
         super().__init__(parent)
-        self._video = video
+        self._queue = list(queue) if queue else [video]
+        try:
+            self._queue_index = next(
+                i for i, v in enumerate(self._queue) if v.id == video.id
+            )
+        except StopIteration:
+            self._queue = [video]
+            self._queue_index = 0
+        self._video = self._queue[self._queue_index]
         self._repo = repo
         self._closing = False
         self._user_seeking = False
         self._resume_pos = 0.0
 
-        self.setWindowTitle(video.filename)
+        self.setWindowTitle(self._video.filename)
         self.resize(960, 560)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -46,8 +54,12 @@ class PlayerWindow(QWidget):
         self.player.setVideoOutput(self.video_widget)
         self.player.setAudioOutput(self.audio)
 
+        self.btn_prev = QPushButton("⏮")
+        self.btn_prev.clicked.connect(self._prev)
         self.btn_play = QPushButton("暂停")
         self.btn_play.clicked.connect(self._toggle_play)
+        self.btn_next = QPushButton("⏭")
+        self.btn_next.clicked.connect(self._next)
         self.btn_stop = QPushButton("停止")
         self.btn_stop.clicked.connect(self._stop)
         self.time_label = QLabel("00:00 / 00:00")
@@ -63,6 +75,8 @@ class PlayerWindow(QWidget):
         self.vol.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
 
         controls = QHBoxLayout()
+        controls.addWidget(self.btn_prev)
+        controls.addWidget(self.btn_next)
         controls.addWidget(self.btn_play)
         controls.addWidget(self.btn_stop)
         controls.addWidget(self.time_label)
@@ -84,11 +98,33 @@ class PlayerWindow(QWidget):
     # ---------- playback ----------
 
     def _start(self) -> None:
+        self._load(self._queue_index)
+
+    def _load(self, index: int) -> None:
+        """Switch the player to the video at `index` in the queue."""
+        self._queue_index = index
+        self._video = self._queue[index]
+        self.setWindowTitle(self._video.filename)
+        self._resume_pos = 0.0
         resume = self._repo.last_position(self._video.id)
-        self.player.setSource(QUrl.fromLocalFile(self._video.filepath))
         if resume > 5.0 and (self._video.duration is None or resume < self._video.duration * 0.9):
             self._resume_pos = resume
+        self.player.setSource(QUrl.fromLocalFile(self._video.filepath))
         self.player.play()
+        self.time_label.setText("00:00 / 00:00")
+        self._update_nav_buttons()
+
+    def _prev(self) -> None:
+        if self._queue_index > 0:
+            self._load(self._queue_index - 1)
+
+    def _next(self) -> None:
+        if self._queue_index < len(self._queue) - 1:
+            self._load(self._queue_index + 1)
+
+    def _update_nav_buttons(self) -> None:
+        self.btn_prev.setEnabled(self._queue_index > 0)
+        self.btn_next.setEnabled(self._queue_index < len(self._queue) - 1)
 
     def _toggle_play(self) -> None:
         if self.player.playbackState() == _PLAYBACK_PLAYING:
@@ -119,8 +155,15 @@ class PlayerWindow(QWidget):
         self.slider.setMaximum(self.player.duration())
 
     def _on_status(self, status) -> None:
+        if self._closing:
+            return
         if status == _MEDIA_END:
-            self._finish(0.0)
+            if self._queue_index < len(self._queue) - 1:
+                # natural end: record the finished video, then roll on
+                self._repo.record_play(self._video.id, 0.0)
+                self._load(self._queue_index + 1)
+            else:
+                self._finish(0.0)
         elif status == _MEDIA_LOADED:
             if self._resume_pos > 0.0:
                 # setPosition before the media is loaded is ignored by

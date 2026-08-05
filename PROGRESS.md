@@ -94,6 +94,9 @@ build.bat                               # 打包 → dist\VideoLib.exe
 16. **纵向 ResizeToContents 会查询所有列**：行高计算时 QHeaderView 对所有列 delegate 的 sizeHint 取 max（实测第 1 列的 TitleWrapDelegate 会被调用，且 sizeHint 的 option.rect.width() 是真实列宽）→ 行高自适应只需给目标列挂 sizeHint-aware delegate + 纵向 ResizeToContents + 横向列宽变化后防抖 resizeSections。
 17. **Qt 换行断词规则**：TextWordWrap 只按可断点换行——CJK 每字可断（中文文件名正常换行），纯拉丁长串（无空格）视为不可断词不换行 → 测试换行必须用中文文本，`'x'*300` 测不出来（返回单行高）。
 18. **ResizeToContents 对纯自绘列塌缩**：播放列只有自绘 delegate、无 DisplayRole 文本 → 默认 sizeHint 为空 → 列宽塌缩到 28px 按钮被挤扁（列宽配置真正生效后才暴露）。铁律：**自绘 delegate（无文本/图标）必须覆盖 sizeHint**（返回按钮文字宽 + 内边距），横向表头会按列 delegate 的 sizeHint 定宽。
+19. **PyQt6.11 `sortIndicatorOrder()` 返回枚举实例**：`int(...)` 抛 `TypeError`，且发生在 `closeEvent` 槽内 → qFatal 闪退（0xC0000409 无输出）。必须 `.value`。铁律：**closeEvent/槽内新增代码里对 Qt 枚举做 `int()` 前先验证 PyQt6.11 行为**（`sortIndicatorSection()` 是普通 int，`sortIndicatorOrder()` 是枚举）。
+20. **成员属性必须在 `__init__` 初始化**：`_cleanup_thread` 只在 0ms 定时器触发后才赋值；窗口未经过任何事件循环就 close → `closeEvent` 里 `self._cleanup_thread is not None` 抛 `AttributeError` → 槽内异常 → qFatal。铁律：**closeEvent 会引用的属性一律在 `__init__` 置 None**。
+21. **parented 0ms 定时器 + 引用环 → 已关闭窗口的定时器在后续事件循环里触发**：`QTimer(self)` 持父引用、窗口属性又持 QTimer → 形成引用环，窗口不随引用计数销毁（靠 GC 才回收）；窗口存活期内无事件循环 → 0ms 定时器一直未触发 → 下一次 `processEvents()` 会调到已关闭窗口的 `_start_orphan_cleanup`，用已 close 的旧 repo 起清理线程 → 线程内 sqlite 异常 → QThread 未捕获异常 → qFatal。修复：**closeEvent 里 `_cleanup_timer.stop()` + 等待运行中的清理线程（对齐 `_stop_watcher`）**。测试表现特征：同一测试函数内建第二个窗口不崩、跨测试必崩（上一测试的窗口毒害下一测试的 `processEvents`）。
 
 ## 6. 验证手段（可复用）
 
@@ -114,6 +117,10 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 播放列宽度修复（会话 4）：ResizeToContents 对纯自绘列塌缩到 28px，按钮被挤扁 → PlayButtonDelegate.sizeHint 按文字自适应（73px）+ 52 用例
 - [ ] 多目录同时监控：当前 watcher 只监控最后扫描的目录，其他目录的变更需手动重扫
 - [x] 删除视频文件功能（会话 4 已做「删除并清除数据」的历史目录级删除；单个文件级删除仍缺，当前只有打开所在文件夹）
+- [x] 窗口/列宽记忆（会话 5）：c清Event 保存 window_geometry + column_widths（仅恢复 Interactive 列）+ 排序状态
+- [x] 排序（会话 5）：_natkey 自然键（v2 < v10）+ 表头点击 + 持久化；sort() 用 layoutChanged 重映射（reset 会递归崩）
+- [x] 断点标记（会话 5）：last_positions 批量查询 + 时长列 ⏵ 前缀（5s < pos < 90% 时长）+ tooltip 续播位置
+- [x] 播放队列（会话 5）：PlayerWindow(queue=...) + ⏮⎭ 按钮 + 自然结束自动续播（EndOfMedia 非最后一条则 record_play(0) 后 _load 下一条，_closing 防误触发）
 - [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
 
 ## 8. 遗留问题（如遇到优先排查）

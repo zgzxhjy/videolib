@@ -683,6 +683,21 @@ class Repository:
             ).fetchone()
             return row["position"] if row else 0.0
 
+    def last_positions(self, video_ids: list[int]) -> dict[int, float]:
+        """Batch resume positions for many videos, one query (id IN ...)."""
+        if not video_ids:
+            return {}
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT video_id, position
+                    FROM play_history
+                    WHERE video_id IN ({",".join("?" * len(video_ids))})
+                    GROUP BY video_id
+                    HAVING id = MAX(id)""",
+                video_ids,
+            ).fetchall()
+            return {r["video_id"]: r["position"] for r in rows}
+
     def recent_plays(self, limit: int = 50) -> list[tuple[PlayRecord, Video]]:
         with self._lock:
             rows = self._conn.execute(
