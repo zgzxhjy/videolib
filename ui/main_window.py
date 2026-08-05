@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -83,6 +84,9 @@ class MainWindow(QMainWindow):
         for col in (2, 3, 4, 5):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_PLAY, QHeaderView.ResizeMode.ResizeToContents)
+        self._count_label = QLabel("共 0 个视频")
+        self.statusBar().addPermanentWidget(self._count_label)
+        self.model.modelReset.connect(self._update_count_label)
         self.model.refresh()
         self.table.selectionModel().selectionChanged.connect(
             lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
@@ -95,6 +99,9 @@ class MainWindow(QMainWindow):
         if root and os.path.isdir(root):
             self._activate_root(root)
             self._start_watcher(root, resume=True)
+
+    def _update_count_label(self) -> None:
+        self._count_label.setText(f"共 {self.model.rowCount():,} 个视频")
 
     def _start_orphan_cleanup(self) -> None:
         self._cleanup_thread = _OrphanCleanupThread(self._repo, self)
@@ -427,7 +434,16 @@ class MainWindow(QMainWindow):
         for v in videos:
             containing.update(l.id for l in self._repo.lists_of_video(v.id))
         if containing:
-            menu.addAction("★ 从收藏夹移除...", lambda: self._remove_from_favorite(videos, containing))
+            if self._view == VIEW_FAVORITES and self._favorite_list_id is not None:
+                menu.addAction(
+                    "★ 从收藏夹移除",
+                    lambda: self._remove_from_favorite(videos, containing),
+                )
+            else:
+                menu.addAction(
+                    "★ 从收藏夹移除...",
+                    lambda: self._remove_from_favorite(videos, containing),
+                )
         menu.addSeparator()
         menu.addAction("添加到分类...", lambda: self._assign_category(videos))
         menu.addAction("从分类移除...", lambda: self._unassign_category(videos))
@@ -447,6 +463,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已将 {len(videos)} 个视频加入收藏夹")
 
     def _remove_from_favorite(self, videos: list[Video], containing: set[int]) -> None:
+        if self._view == VIEW_FAVORITES and self._favorite_list_id is not None:
+            list_id = self._favorite_list_id
+            for v in videos:
+                self._repo.remove_favorite(v.id, list_id)
+            self._rebuild_favorites_menu()
+            self.model.refresh_favorites(list_id)
+            self.statusBar().showMessage(f"已将 {len(videos)} 个视频移出收藏夹")
+            return
         dialog = PickFavoriteListDialog(
             self._repo, "从收藏夹移除", video_ids=[v.id for v in videos], parent=self
         )

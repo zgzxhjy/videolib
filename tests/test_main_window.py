@@ -81,6 +81,77 @@ def test_rows_have_fixed_height(qapp, app_env):
         w.close()
 
 
+def test_remove_favorite_direct_from_current_list(qapp, app_env, monkeypatch):
+    """In the favorites view, removing must act on the current list directly,
+    without asking which list to remove from."""
+    from PyQt6.QtWidgets import QDialog
+
+    from ui.main_window import VIEW_ALL, VIEW_FAVORITES
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    lst = app_env.create_favorite_list("收藏夹_默认")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    app_env.add_favorite(a.id, lst.id)
+
+    calls: list[bool] = []
+
+    class FakeDialog(QDialog):
+        def __init__(self, *a, **k):
+            super().__init__()
+            calls.append(True)
+
+        def exec(self):
+            return 0  # rejected: dialog path must not remove anything
+
+    monkeypatch.setattr("ui.main_window.PickFavoriteListDialog", FakeDialog)
+
+    w = _make_window(app_env)
+    try:
+        w._favorite_list_id = lst.id
+        w._set_view(VIEW_FAVORITES)
+        qapp.processEvents()
+        assert w.model.rowCount() == 1
+
+        w._remove_from_favorite([a], {lst.id})
+        qapp.processEvents()
+        assert not calls, "favorites view must remove without a dialog"
+        assert app_env.lists_of_video(a.id) == []
+        assert app_env.get_favorites(lst.id) == []
+        assert w.model.rowCount() == 0
+
+        app_env.add_favorite(a.id, lst.id)
+        w._set_view(VIEW_ALL)
+        w._remove_from_favorite([a], {lst.id})
+        assert calls, "other views must still open the picker"
+        assert app_env.lists_of_video(a.id), "rejected dialog must not remove"
+    finally:
+        w.close()
+
+
+def test_count_label_follows_view(qapp, app_env):
+    """The status bar must show the video count of the current view."""
+    from ui.main_window import VIEW_ALL, VIEW_FAVORITES
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    lst = app_env.create_favorite_list("收藏夹_默认")
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        assert w._count_label.text() == "共 2 个视频"
+
+        w._favorite_list_id = lst.id
+        w._set_view(VIEW_FAVORITES)
+        qapp.processEvents()
+        assert w._count_label.text() == "共 0 个视频"
+
+        w._set_view(VIEW_ALL)
+        qapp.processEvents()
+        assert w._count_label.text() == "共 2 个视频"
+    finally:
+        w.close()
+
+
 def test_play_column_fits_button(qapp, app_env):
     """ResizeToContents must not collapse the self-drawn play column (regression: 28px)."""
     _mk_video(app_env, "测试.mp4", "D:/x/测试.mp4")
