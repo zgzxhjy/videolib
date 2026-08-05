@@ -8,9 +8,7 @@ from watchdog.observers import Observer
 
 import config
 from domain.repository import Repository
-from services.metadata import build_video
-from services.scanner import scan_directory
-from services.thumbnailer import Thumbnailer
+from services.library import Library
 
 
 class _Handler(FileSystemEventHandler):
@@ -84,17 +82,12 @@ class WatcherThread(QThread):
             observer.join()
 
     def _flush(self) -> None:
-        if self._removed:
-            deleted_ids = self._repo.remove_by_filepaths(list(self._removed))
-            Thumbnailer().delete_for(deleted_ids)
-            self._removed.clear()
+        library = Library(self._repo)
+        removed = list(self._removed)
+        self._removed.clear()
         added = [p for p in self._added if Path(p).exists()]
         self._added.clear()
-        if added:
-            self._repo.upsert_videos([build_video(p) for p in added])
-        if self._changed:
-            for p in self._changed:
-                if Path(p).exists():
-                    self._repo.upsert_videos([build_video(p)])
-            self._changed.clear()
+        changed = [p for p in self._changed if Path(p).exists()]
+        self._changed.clear()
+        library.apply_sync(added + changed, removed)
         self.changed.emit()

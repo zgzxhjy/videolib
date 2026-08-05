@@ -231,7 +231,7 @@ def test_scan_worker_cancel_keeps_stale(tmp_path, monkeypatch):
         time.sleep(0.1)
         return build_video(fp)
 
-    monkeypatch.setattr("ui.scan_worker.build_video", slow_build)
+    monkeypatch.setattr("services.library.build_video", slow_build)
     worker = ScanWorker(str(root), repo)
     worker.start()
     time.sleep(0.3)
@@ -293,7 +293,7 @@ def test_scan_worker_incremental_skips_unchanged(tmp_path, monkeypatch):
         probe_count["n"] += 1
         return real_build(fp)
 
-    monkeypatch.setattr("ui.scan_worker.build_video", counting_build)
+    monkeypatch.setattr("services.library.build_video", counting_build)
 
     worker = ScanWorker(str(root), repo)
     worker.start()

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 
 from domain.repository import Repository
-from services.thumbnailer import Thumbnailer
+from services.library import Library
 
 
 class PickScanRootDialog(QDialog):
@@ -91,8 +91,7 @@ class PickScanRootDialog(QDialog):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        deleted_ids = self._repo.remove_videos_under(root)
-        Thumbnailer().delete_for(deleted_ids)
+        Library(self._repo).remove_root(root)
         self._repo.remove_scan_root(root)
         self.deleted_roots.append(root)
         self._reload()

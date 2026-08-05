@@ -3,9 +3,8 @@ import time
 
 import config
 from domain.repository import Repository
-from services.metadata import build_video
+from services.library import Library
 from services.scanner import diff_scan, scan_directory
-from services.thumbnailer import Thumbnailer
 
 
 def cmd_index(args) -> None:
@@ -18,18 +17,14 @@ def cmd_index(args) -> None:
     need_probe, stale = diff_scan(files, repo.existing_under(args.root))
     print(f"{len(need_probe)} to probe, {len(stale)} stale under root")
 
-    videos = []
-    for i, fp in enumerate(need_probe, 1):
-        videos.append(build_video(fp))
-        if i % 200 == 0:
-            print(f"  probed {i}/{len(need_probe)}")
-    changed = repo.upsert_videos(videos)
-    print(f"upserted {len(videos)} rows ({changed} changed)")
-
-    if stale:
-        deleted_ids = repo.remove_by_filepaths(stale)
-        Thumbnailer().delete_for(deleted_ids)
-        print(f"removed {len(deleted_ids)} stale entries")
+    result = Library(repo).apply_sync(
+        need_probe,
+        stale,
+        progress=lambda done, total, _fp: print(f"  probed {done}/{total}") if done % 200 == 0 else None,
+    )
+    print(f"upserted {result.probed} rows ({result.changed} changed)")
+    if result.removed:
+        print(f"removed {result.removed} stale entries")
     repo.register_scan(args.root)
     print(f"total in db: {repo.count()}")
     repo.close()
