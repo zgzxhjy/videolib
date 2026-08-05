@@ -13,11 +13,20 @@ from PyQt6.QtWidgets import (
 from domain.models import Video
 from domain.repository import Repository
 
+# Resolved once at import so callers (and tests that stub QMediaPlayer) can
+# never shadow them at call time.
+_MEDIA_END = QMediaPlayer.MediaStatus.EndOfMedia
+_MEDIA_LOADED = QMediaPlayer.MediaStatus.LoadedMedia
+_PLAYBACK_PLAYING = QMediaPlayer.PlaybackState.PlayingState
+
 
 class PlayerWindow(QWidget):
     """Playback window with resume and play-history recording."""
 
     finished = pyqtSignal(int, float)  # video_id, last position
+
+    SEEK_STEP_S = 5
+    VOL_STEP = 5
 
     def __init__(self, video: Video, repo: Repository, parent=None):
         super().__init__(parent)
@@ -25,9 +34,11 @@ class PlayerWindow(QWidget):
         self._repo = repo
         self._closing = False
         self._user_seeking = False
+        self._resume_pos = 0.0
 
         self.setWindowTitle(video.filename)
         self.resize(960, 560)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.video_widget = QVideoWidget()
         self.player = QMediaPlayer(self)
@@ -68,6 +79,7 @@ class PlayerWindow(QWidget):
         self.player.mediaStatusChanged.connect(self._on_status)
 
         self._start()
+        self.setFocus()
 
     # ---------- playback ----------
 
@@ -75,11 +87,11 @@ class PlayerWindow(QWidget):
         resume = self._repo.last_position(self._video.id)
         self.player.setSource(QUrl.fromLocalFile(self._video.filepath))
         if resume > 5.0 and (self._video.duration is None or resume < self._video.duration * 0.9):
-            self.player.setPosition(int(resume * 1000))
+            self._resume_pos = resume
         self.player.play()
 
     def _toggle_play(self) -> None:
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.player.playbackState() == _PLAYBACK_PLAYING:
             self.player.pause()
             self.btn_play.setText("播放")
         else:
@@ -107,10 +119,38 @@ class PlayerWindow(QWidget):
         self.slider.setMaximum(self.player.duration())
 
     def _on_status(self, status) -> None:
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        if status == _MEDIA_END:
             self._finish(0.0)
-        elif status == QMediaPlayer.MediaStatus.LoadedMedia:
-            pass
+        elif status == _MEDIA_LOADED:
+            if self._resume_pos > 0.0:
+                # setPosition before the media is loaded is ignored by
+                # QMediaPlayer; seek only once duration is known.
+                self.player.setPosition(int(self._resume_pos * 1000))
+                self._resume_pos = 0.0
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key.Key_Right:
+            self.player.setPosition(self.player.position() + self.SEEK_STEP_S * 1000)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Left:
+            self.player.setPosition(max(0, self.player.position() - self.SEEK_STEP_S * 1000))
+            event.accept()
+            return
+        if key == Qt.Key.Key_Up:
+            self.vol.setValue(min(100, self.vol.value() + self.VOL_STEP))
+            event.accept()
+            return
+        if key == Qt.Key.Key_Down:
+            self.vol.setValue(max(0, self.vol.value() - self.VOL_STEP))
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ---------- lifecycle ----------
 
@@ -123,6 +163,9 @@ class PlayerWindow(QWidget):
     def closeEvent(self, event) -> None:
         if not self._closing:
             pos = self.player.position() / 1000.0
+            if pos < 5.0:
+                # a trivial reopen-and-close must not clobber the resume point
+                pos = max(pos, self._repo.last_position(self._video.id))
             self._repo.record_play(self._video.id, pos)
             self.finished.emit(self._video.id, pos)
         self.player.stop()
