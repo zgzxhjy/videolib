@@ -157,6 +157,37 @@ def test_thumbnail_no_repeat_work(video_dir, tmp_path):
     assert thumbs.ensure(str(video_dir), 1) is True
 
 
+def test_thumbnail_zero_byte_regenerates(video_dir, tmp_path):
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    assert thumbs.ensure(str(video_dir), 1) is True
+    thumbs.path_for(1).write_bytes(b"")  # corrupt it
+    assert thumbs.ensure(str(video_dir), 1) is True, "zero-byte thumbs must regenerate"
+    assert thumbs.path_for(1).stat().st_size > 0
+
+
+def test_cleanup_orphans_removes_zero_byte_and_orphans(tmp_path):
+    from services.thumbnailer import Thumbnailer
+
+    d = tmp_path / "thumbs"
+    d.mkdir()
+    (d / "1.jpg").write_bytes(b"\xff\xd8data")
+    (d / "2.jpg").write_bytes(b"")  # zero-byte: corrupt, must go
+    (d / "3.jpg").write_bytes(b"x")
+    (d / "junk.txt").write_text("keep")
+    (d / "abc.jpg").write_bytes(b"x")  # non-numeric stem: kept
+
+    removed = Thumbnailer.cleanup_orphans(d, valid_ids={1, 3})
+    assert removed == 1, "only the zero-byte file is removed (2 and 3 are valid)"
+    assert (d / "1.jpg").exists()
+    assert not (d / "2.jpg").exists()
+    assert (d / "3.jpg").exists()
+    assert (d / "junk.txt").exists()
+    assert (d / "abc.jpg").exists()
+
+    removed = Thumbnailer.cleanup_orphans(d, valid_ids={1})
+    assert removed == 1, "orphan 3.jpg must be removed now"
+
+
 def test_delete_for_removes_only_target_thumbs(tmp_path):
     thumbs = Thumbnailer(tmp_path / "thumbs")
     for vid in (1, 2):

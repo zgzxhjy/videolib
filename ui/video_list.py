@@ -65,6 +65,8 @@ class ThumbRunnable(QRunnable):
         ok = Thumbnailer().ensure(self.filepath, self.video_id, repo=self.repo)
         if ok:
             self.cb.thumb_ready.emit(self.video_id)
+        else:
+            self.cb.thumb_failed.emit(self.video_id)
 
 
 class PlayButtonDelegate(QStyledItemDelegate):
@@ -177,6 +179,7 @@ class VideoTableModel(QAbstractTableModel):
     COLUMNS = ["", "文件名", "时长", "分辨率", "编码", "大小", "播放"]
 
     thumb_ready = pyqtSignal(int)
+    thumb_failed = pyqtSignal(int)
 
     def __init__(self, repo: Repository, thumbs_dir: Path):
         super().__init__()
@@ -185,12 +188,14 @@ class VideoTableModel(QAbstractTableModel):
         self._videos: list[Video] = []
         self._id_to_row: dict[int, int] = {}
         self._resume_positions: dict[int, float] = {}
+        self._pix_cache: dict[int, QPixmap] = {}
         self._scanning = False
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(4)
         self._requested: set[int] = set()
         self._lock = threading.Lock()
         self.thumb_ready.connect(self._on_thumb_ready)
+        self.thumb_failed.connect(self._on_thumb_failed)
 
     # ---------- data loading ----------
 
@@ -200,6 +205,7 @@ class VideoTableModel(QAbstractTableModel):
         self._id_to_row = {v.id: i for i, v in enumerate(videos)}
         self._resume_positions = self._repo.last_positions([v.id for v in videos])
         self._requested.clear()
+        self._pix_cache.clear()
         self.endResetModel()
 
     def set_scanning(self, scanning: bool) -> None:
@@ -344,13 +350,22 @@ class VideoTableModel(QAbstractTableModel):
         return Thumbnailer.path(self._thumbs_dir, video_id)
 
     def _load_thumb(self, v: Video) -> QIcon | None:
+        cached = self._pix_cache.get(v.id)
+        if cached is not None and not cached.isNull():
+            return QIcon(cached)
         thumb = self._thumb_path(v.id)
         if thumb.exists():
             pixmap = QPixmap(str(thumb))
             if not pixmap.isNull():
+                self._cache_pixmap(v.id, pixmap)
                 return QIcon(pixmap)
         self._schedule(v)
         return QIcon()
+
+    def _cache_pixmap(self, video_id: int, pixmap: QPixmap) -> None:
+        if len(self._pix_cache) >= 2000:
+            self._pix_cache.clear()
+        self._pix_cache[video_id] = pixmap
 
     def _schedule(self, v: Video) -> None:
         if self._scanning:
@@ -364,12 +379,35 @@ class VideoTableModel(QAbstractTableModel):
         runnable = ThumbRunnable(v.filepath, v.id, thumb=self._thumb_path(v.id), repo=self._repo, cb=self)
         self._pool.start(runnable)
 
+    def regenerate_thumbs(self, video_ids: list[int]) -> None:
+        """Delete the thumbnail files so the ids re-generate on next paint."""
+        Thumbnailer().delete_for(video_ids)
+        with self._lock:
+            for vid in video_ids:
+                self._requested.discard(vid)
+                self._pix_cache.pop(vid, None)
+        for vid in video_ids:
+            v = self.video_at(self._id_to_row[vid]) if vid in self._id_to_row else None
+            if v is not None:
+                self._schedule(v)
+
     def _on_thumb_ready(self, video_id: int) -> None:
+        thumb = self._thumb_path(video_id)
+        if thumb.exists():
+            pixmap = QPixmap(str(thumb))
+            if not pixmap.isNull():
+                self._cache_pixmap(video_id, pixmap)
         row = self._id_to_row.get(video_id)
         if row is None:
             return
         idx = self.index(row, COL_THUMB)
         self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+
+    def _on_thumb_failed(self, video_id: int) -> None:
+        # drop the request so the next scroll/paint retries (a transient
+        # failure like an unmounted drive should not poison the session)
+        with self._lock:
+            self._requested.discard(video_id)
 
 
 def _fmt_duration(seconds: float | None) -> str:

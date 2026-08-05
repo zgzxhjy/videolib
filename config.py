@@ -8,6 +8,9 @@ APP_DIR = Path(os.environ.get("VIDEOLIB_HOME", Path.home() / ".videolib"))
 DB_PATH = APP_DIR / "videolib.db"
 THUMBS_DIR = APP_DIR / "thumbs"
 SETTINGS_PATH = APP_DIR / "settings.json"
+BACKUPS_DIR = APP_DIR / "backups"
+
+BACKUP_KEEP = 5
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",

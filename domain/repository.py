@@ -208,6 +208,16 @@ class Repository:
             self._conn.commit()
             self._videos_dirty = False
 
+    def backup_to(self, dest: str | Path) -> None:
+        """Snapshot the database (WAL-aware) to `dest` via the backup API."""
+        dest = str(dest)
+        with self._lock:
+            target = sqlite3.connect(dest)
+            try:
+                self._conn.backup(target)
+            finally:
+                target.close()
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -347,6 +357,35 @@ class Repository:
     def all_video_ids(self) -> set[int]:
         with self._lock:
             return {r["id"] for r in self._conn.execute("SELECT id FROM videos")}
+
+    def find_duplicates(self, tolerance: float = 2.0) -> list[list[Video]]:
+        """Group videos that are likely copies: same file size and a duration
+        within `tolerance` seconds. Videos without size/duration are skipped."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM videos
+                   WHERE file_size > 0 AND duration IS NOT NULL
+                   ORDER BY file_size, duration"""
+            ).fetchall()
+        videos = [_row_to_video(r) for r in rows]
+        groups: dict[int, list[Video]] = {}
+        for v in videos:
+            groups.setdefault(v.file_size, []).append(v)
+        dups: list[list[Video]] = []
+        for size_group in groups.values():
+            if len(size_group) < 2:
+                continue
+            size_group.sort(key=lambda v: v.duration or 0.0)
+            cluster: list[Video] = []
+            for v in size_group:
+                if cluster and (v.duration or 0.0) - (cluster[-1].duration or 0.0) > tolerance:
+                    if len(cluster) > 1:
+                        dups.append(cluster)
+                    cluster = []
+                cluster.append(v)
+            if len(cluster) > 1:
+                dups.append(cluster)
+        return dups
 
     def videos_in_root(self, root: str | None, limit: int | None = None) -> list[Video]:
         """Videos under a scan root. root=None falls back to the whole library."""
@@ -824,17 +863,22 @@ class Repository:
             return row["position"] if row else 0.0
 
     def last_positions(self, video_ids: list[int]) -> dict[int, float]:
-        """Batch resume positions for many videos, one query (id IN ...)."""
+        """Batch resume positions for many videos (id IN ..., chunked so huge
+        libraries never hit SQLite's variable limit)."""
         if not video_ids:
             return {}
+        result: dict[int, float] = {}
         with self._lock:
-            rows = self._conn.execute(
-                f"""SELECT video_id, position
-                    FROM play_history
-                    WHERE video_id IN ({",".join("?" * len(video_ids))})""",
-                video_ids,
-            ).fetchall()
-            return {r["video_id"]: r["position"] for r in rows}
+            for i in range(0, len(video_ids), CHUNK_SIZE):
+                chunk = video_ids[i : i + CHUNK_SIZE]
+                rows = self._conn.execute(
+                    f"""SELECT video_id, position
+                        FROM play_history
+                        WHERE video_id IN ({",".join("?" * len(chunk))})""",
+                    chunk,
+                ).fetchall()
+                result.update({r["video_id"]: r["position"] for r in rows})
+            return result
 
     def recent_plays(self, limit: int = 50) -> list[tuple[PlayRecord, Video]]:
         with self._lock:

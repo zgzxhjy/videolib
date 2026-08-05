@@ -3,6 +3,7 @@ from pathlib import Path
 
 import config
 from domain.repository import Repository
+from services.backup import backup_db
 from services.metadata import build_video
 from services.thumbnailer import Thumbnailer
 
@@ -68,7 +69,12 @@ class Library:
         )
 
     def remove_paths(self, paths: list[str]) -> int:
-        """Delete videos by filepath, along with their thumbnails."""
+        """Delete videos by filepath, along with their thumbnails.
+
+        The database is snapshotted first so a destructive action can be
+        rolled back.
+        """
+        backup_db(self._repo, force=True)
         deleted_ids = self._repo.remove_by_filepaths(paths)
         Thumbnailer(self._thumbs_dir).delete_for(deleted_ids)
         return len(deleted_ids)
@@ -77,8 +83,10 @@ class Library:
         """Delete all videos under a scan root, along with their thumbnails.
 
         The root's category tree is removed too (categories are scoped to a
-        scan root). Favorites links cascade inside the repository.
+        scan root). Favorites links cascade inside the repository. The
+        database is snapshotted first.
         """
+        backup_db(self._repo, force=True)
         deleted_ids = self._repo.remove_videos_under(root)
         Thumbnailer(self._thumbs_dir).delete_for(deleted_ids)
         return len(deleted_ids)

@@ -74,9 +74,13 @@ class FakePlayer(QObject):
 class FakeAudioOutput:
     def __init__(self, parent=None):
         self.volume = 0.8
+        self.muted = False
 
     def setVolume(self, v):
         self.volume = v
+
+    def setMuted(self, m):
+        self.muted = m
 
 
 @pytest.fixture()
@@ -314,3 +318,66 @@ def test_queue_end_of_middle_records_but_keeps_window(qapp, player_env, fake_pla
     assert player_env.last_position(a.id) == 0.0, "finished video must be recorded"
     assert w.isVisible() or True  # window stays open for the next video
     w.close()
+
+
+def test_mute_toggle_button_and_m_key(qapp, player_env, fake_player):
+    _ensure_video(player_env)
+    w = _window(player_env)
+    try:
+        assert w.btn_mute.text() == "静音"
+        w.btn_mute.click()
+        assert w.audio.muted is True, "mute button must mute the audio output"
+        assert w.btn_mute.text() == "已静音"
+
+        w.btn_mute.click()
+        assert w.audio.muted is False
+
+        QTest.keyClick(w, Qt.Key.Key_M)
+        assert w.audio.muted is True, "M must toggle mute too"
+        QTest.keyClick(w, Qt.Key.Key_M)
+        assert w.audio.muted is False
+    finally:
+        w.close()
+
+
+def test_loop_single_replays_current(qapp, player_env, fake_player):
+    from PyQt6.QtCore import QUrl
+
+    from ui.player import PlayerWindow
+
+    a, b = _ensure_videos(player_env, "a.mp4", "b.mp4")
+    w = PlayerWindow(a, player_env, queue=[a, b])
+    try:
+        assert w.btn_loop.text() == "循环:关"
+        w.btn_loop.click()
+        assert w.btn_loop.text() == "循环:单曲"
+
+        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        assert w.windowTitle() == "a.mp4", "single loop must replay the current video"
+        assert w.player.source == QUrl.fromLocalFile(r"D:\v\a.mp4")
+        assert w.player.positions == [], "single loop must not seek (no resume)"
+    finally:
+        w.close()
+
+
+def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
+    from PyQt6.QtCore import QUrl
+
+    from ui.player import PlayerWindow
+
+    a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
+    w = PlayerWindow(c, player_env, queue=[a, b, c])
+    try:
+        w.btn_loop.click()
+        w.btn_loop.click()
+        assert w.btn_loop.text() == "循环:全部"
+
+        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        assert w.windowTitle() == "a.mp4", "all loop must wrap to the first video"
+        assert w.player.source == QUrl.fromLocalFile(r"D:\v\a.mp4")
+        assert player_env.last_position(c.id) == 0.0
+
+        QTest.keyClick(w, Qt.Key.Key_L)
+        assert w.btn_loop.text() == "循环:关", "L must cycle loop modes"
+    finally:
+        w.close()

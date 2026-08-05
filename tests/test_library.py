@@ -134,6 +134,11 @@ def test_remove_paths_deletes_rows_and_thumbs(tmp_path, repo):
     assert repo.count() == 0
     assert not _thumb(thumbs_dir, v.id).exists()
 
+    import config
+
+    files = list(config.BACKUPS_DIR.glob("videolib-*.db"))
+    assert files, "remove_paths must snapshot the db first"
+
 
 def test_remove_root_deletes_rows_and_thumbs_under_root(tmp_path, repo):
     root = tmp_path / "root"

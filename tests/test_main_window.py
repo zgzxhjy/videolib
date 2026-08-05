@@ -654,3 +654,149 @@ def test_resume_marker_tracks_sort(qapp, app_env):
         assert not m.data(m.index(1 - row_a, 2)).startswith("⏵")
     finally:
         w.close()
+
+
+def _capture_info(monkeypatch):
+    captured = {}
+    from PyQt6.QtWidgets import QMessageBox
+
+    def fake_info(parent, title, text):
+        captured["title"] = title
+        captured["text"] = text
+
+    monkeypatch.setattr("ui.main_window.QMessageBox.information", staticmethod(fake_info))
+    return captured
+
+
+def test_find_duplicates_reports_groups(qapp, app_env, monkeypatch):
+    from domain.models import Video
+
+    app_env.upsert_videos([
+        Video(filename="a.mp4", filepath="D:/x/a.mp4", file_size=1000, duration=60.0),
+        Video(filename="copy_a.mp4", filepath="D:/x/copy_a.mp4", file_size=1000, duration=59.8),
+        Video(filename="b.mp4", filepath="D:/x/b.mp4", file_size=1000, duration=120.0),
+    ])
+    w = _make_window(app_env)
+    try:
+        captured = _capture_info(monkeypatch)
+        w._find_duplicates()
+        assert captured["title"] == "查找重复视频"
+        assert "发现 1 组" in captured["text"]
+        assert "[2 个" in captured["text"]
+        assert "a.mp4" in captured["text"] and "copy_a.mp4" in captured["text"]
+    finally:
+        w.close()
+
+
+def test_find_duplicates_empty_result(qapp, app_env, monkeypatch):
+    _mk_video(app_env, "only.mp4", "D:/x/only.mp4")
+    w = _make_window(app_env)
+    try:
+        captured = _capture_info(monkeypatch)
+        w._find_duplicates()
+        assert "未发现重复视频" in captured["text"]
+    finally:
+        w.close()
+
+
+def test_regenerate_thumbs_deletes_files(qapp, app_env, tmp_path, monkeypatch):
+    import config
+
+    from PyQt6.QtCore import QRunnable
+
+    video_file = tmp_path / "a.mp4"
+    video_file.write_bytes(b"video")
+    started = []
+
+    class _FakeRunnable(QRunnable):
+        def __init__(self, filepath, video_id, thumb=None, repo=None, cb=None):
+            super().__init__()
+            started.append(video_id)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr("ui.video_list.ThumbRunnable", _FakeRunnable)
+    _mk_video(app_env, "a.mp4", str(video_file))
+    v = app_env.get_by_path(str(video_file))
+    thumb = config.THUMBS_DIR / f"{v.id}.jpg"
+    thumb.parent.mkdir(parents=True, exist_ok=True)
+    thumb.write_bytes(b"thumb")
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        started.clear()  # forget the initial paint-triggered requests
+        w._regenerate_thumbs([v])
+        assert not thumb.exists(), "regenerate must delete the stale file"
+        assert started == [v.id], "the model must re-request the thumb"
+    finally:
+        w.close()
+
+
+class _FakeWatcherThread:
+    def __init__(self, roots, repo):
+        self.roots = roots
+        self.repo = repo
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def wait(self, ms):
+        pass
+
+    def _connect(self, cb):
+        pass
+
+    message = property(lambda self: type("_Sig", (), {"connect": self._connect})())
+    changed = property(lambda self: type("_Sig", (), {"connect": self._connect})())
+
+
+def test_start_watcher_multiple_roots(qapp, app_env, monkeypatch):
+    import ui.main_window as mw
+
+    created = []
+    monkeypatch.setattr(
+        mw, "WatcherThread",
+        lambda roots, repo: created.append((roots, repo)) or _FakeWatcherThread(roots, repo),
+    )
+    w = _make_window(app_env)
+    try:
+        w._start_watcher(["D:/a", "D:/b"], resume=True)
+        assert len(created) == 1
+        assert created[0][0] == ["D:/a", "D:/b"]
+        assert created[0][1] is app_env
+        assert w._watcher is not None and w._watcher.started
+
+        w._start_watcher([], resume=False)
+        assert w._watcher is None, "empty roots must stop the watcher"
+    finally:
+        w.close()
+
+
+def test_watch_roots_persist_and_migrate_legacy(qapp, app_env, monkeypatch):
+    import config
+
+    import ui.main_window as mw
+
+    monkeypatch.setattr(mw, "WatcherThread", _FakeWatcherThread)
+    w = _make_window(app_env)
+    try:
+        assert w._watch_roots() == []
+        w._save_watch_roots([r"D:\new"])
+        assert w._watch_roots() == [r"D:\new"]
+
+        config.save_setting("watch_root", r"D:\old")
+        config.save_setting("watch_roots", None)
+        assert w._watch_roots() == [r"D:\old"], "legacy watch_root string must migrate"
+
+        config.save_setting("watch_roots", [r"D:\a", r"D:\b"])
+        config.save_setting("watch_root", None)
+        assert w._watch_roots() == [r"D:\a", r"D:\b"]
+    finally:
+        w.close()

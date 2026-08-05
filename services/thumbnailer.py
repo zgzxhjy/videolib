@@ -109,9 +109,10 @@ class Thumbnailer:
         return self.path_for(video_id).exists()
 
     def ensure(self, filepath: str, video_id: int, repo=None) -> bool:
-        """Generate thumb if missing. When repo is given, persist thumb_path."""
+        """Generate thumb if missing (or zero-byte/corrupt). When repo is
+        given, persist thumb_path."""
         thumb = self.path_for(video_id)
-        if thumb.exists():
+        if thumb.exists() and thumb.stat().st_size > 0:
             return True
         with self._lock:
             if filepath in self._pending:
@@ -128,14 +129,15 @@ class Thumbnailer:
 
     @staticmethod
     def cleanup_orphans(thumbs_dir: str | Path, valid_ids: set[int]) -> int:
-        """Delete thumbnails whose video no longer exists in the DB."""
+        """Delete thumbnails whose video no longer exists in the DB, plus
+        zero-byte files (corrupt thumbs would never regenerate otherwise)."""
         removed = 0
         for f in Path(thumbs_dir).glob("*.jpg"):
             try:
                 video_id = int(f.stem)
             except ValueError:
                 continue
-            if video_id not in valid_ids:
+            if video_id not in valid_ids or f.stat().st_size == 0:
                 try:
                     f.unlink()
                     removed += 1

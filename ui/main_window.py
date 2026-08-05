@@ -110,10 +110,10 @@ class MainWindow(QMainWindow):
         self._cleanup_timer.timeout.connect(self._start_orphan_cleanup)
         self._cleanup_timer.start(0)
 
-        root = config.load_settings().get("watch_root")
-        if root and os.path.isdir(root):
-            self._activate_root(root)
-            self._start_watcher(root, resume=True)
+        roots = self._watch_roots()
+        if roots:
+            self._activate_root(roots[0])
+            self._start_watcher(roots, resume=True)
 
     def _update_count_label(self) -> None:
         self._count_label.setText(f"共 {self.model.rowCount():,} 个视频")
@@ -221,6 +221,7 @@ class MainWindow(QMainWindow):
         self._history_action.setMenu(self._history_menu)
         tb.addAction("刷新", self._refresh_all)
         tb.addAction("统计", self._show_stats)
+        tb.addAction("查找重复", self._find_duplicates)
         tb.addSeparator()
         tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
@@ -313,10 +314,15 @@ class MainWindow(QMainWindow):
         if not deleted:
             return
         self._rebuild_history_menu()
+        watched = self._watch_roots()
+        changed = False
         for root in deleted:
-            if root == config.load_settings().get("watch_root"):
-                self._stop_watcher()
-                config.save_setting("watch_root", None)
+            if root in watched:
+                watched.remove(root)
+                changed = True
+        if changed:
+            self._save_watch_roots(watched)
+            self._start_watcher(watched)
         self._refresh_all()
         self.statusBar().showMessage(f"已删除 {len(deleted)} 个历史目录")
 
@@ -504,8 +510,11 @@ class MainWindow(QMainWindow):
         self._refresh_all()
         if status == "ok":
             self._rebuild_history_menu()
-            config.save_setting("watch_root", root)
-            self._start_watcher(root)
+            roots = self._watch_roots()
+            if root not in roots:
+                roots.append(root)
+            self._save_watch_roots(roots)
+            self._start_watcher(roots)
             self.statusBar().showMessage("扫描完成，已开启增量监控")
         else:
             self.statusBar().showMessage("扫描取消/出错，未开启增量监控")
@@ -516,15 +525,30 @@ class MainWindow(QMainWindow):
         self._set_view(self._view)
         QMessageBox.warning(self, "扫描结果", f"该目录下没有视频文件:\n{root}")
 
-    def _start_watcher(self, root: str, resume: bool = False) -> None:
+    def _watch_roots(self) -> list[str]:
+        """All scan roots currently under incremental watch (settings key
+        'watch_roots'; legacy 'watch_root' string is migrated on read)."""
+        s = config.load_settings()
+        roots = s.get("watch_roots")
+        if roots is None:
+            legacy = s.get("watch_root")
+            roots = [legacy] if legacy else []
+        return [r for r in roots if isinstance(r, str) and r]
+
+    def _save_watch_roots(self, roots: list[str]) -> None:
+        config.save_setting("watch_roots", roots)
+
+    def _start_watcher(self, roots: list[str], resume: bool = False) -> None:
         self._stop_watcher()
-        watcher = WatcherThread(root, self._repo)
+        if not roots:
+            return
+        watcher = WatcherThread(roots, self._repo)
         watcher.message.connect(self.statusBar().showMessage)
         watcher.changed.connect(self._on_watch_changed)
         self._watcher = watcher
         watcher.start()
         if resume:
-            self.statusBar().showMessage(f"已恢复监控: {root}")
+            self.statusBar().showMessage(f"已恢复监控 {len(roots)} 个目录")
 
     def _on_watch_changed(self) -> None:
         if self.search.text():
@@ -589,6 +613,7 @@ class MainWindow(QMainWindow):
         menu.addAction("从分类移除...", lambda: self._unassign_category(videos))
         menu.addSeparator()
         menu.addAction("打开所在文件夹", lambda: self._reveal(videos[0]))
+        menu.addAction("重新生成缩略图", lambda: self._regenerate_thumbs(videos))
         menu.addAction("✔ 标记为已看完", lambda: self._mark_finished(videos))
         menu.addAction("复制路径", lambda: self._copy_paths(videos))
         menu.addAction("复制文件名", lambda: self._copy_names(videos))
@@ -596,6 +621,26 @@ class MainWindow(QMainWindow):
         menu.addAction("从库中移除", lambda: self._remove_from_library(videos))
         menu.addAction("删除文件并移入回收站...", lambda: self._delete_files(videos))
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _regenerate_thumbs(self, videos: list[Video]) -> None:
+        ids = [v.id for v in videos]
+        self.model.regenerate_thumbs(ids)
+        self.statusBar().showMessage(f"已重新生成 {len(ids)} 个缩略图")
+
+    def _find_duplicates(self) -> None:
+        from ui.video_list import _fmt_size
+
+        dups = self._repo.find_duplicates()
+        if not dups:
+            QMessageBox.information(self, "查找重复视频", "未发现重复视频。\n判定依据：相同大小 + 时长相差不超过 2 秒。")
+            return
+        lines = [f"发现 {len(dups)} 组可能重复的视频：", ""]
+        for group in dups:
+            lines.append(f"[{len(group)} 个，{_fmt_size(group[0].file_size or 0)}]")
+            for v in group:
+                lines.append(f"  {v.filename}\n    {v.filepath}")
+            lines.append("")
+        QMessageBox.information(self, "查找重复视频", "\n".join(lines))
 
     def _mark_finished(self, videos: list[Video]) -> None:
         for v in videos:

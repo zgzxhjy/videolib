@@ -462,3 +462,59 @@ def test_migration_adds_columns(tmp_path):
         assert len(repo.get_categories()) == 1
     finally:
         repo.close()
+
+
+def test_backup_to_creates_usable_snapshot(repo, tmp_path):
+    repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4", duration=5.0)])
+    dest = tmp_path / "snapshot.db"
+    repo.backup_to(dest)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(dest))
+    try:
+        rows = conn.execute("SELECT filepath, duration FROM videos").fetchall()
+        assert rows == [(r"D:\v\a.mp4", 5.0)]
+    finally:
+        conn.close()
+
+
+def test_last_positions_chunked_across_boundary(repo):
+    """A view bigger than one chunk must still resolve all resume positions."""
+    videos = [_mk(f"v{i}.mp4", rf"D:\v\v{i}.mp4") for i in range(505)]
+    repo.upsert_videos(videos)
+    ids = [repo.get_by_path(rf"D:\v\v{i}.mp4").id for i in range(505)]
+    repo.record_play(ids[0], 12.0)
+    repo.record_play(ids[503], 34.0)
+
+    positions = repo.last_positions(ids)
+    assert positions[ids[0]] == 12.0
+    assert positions[ids[503]] == 34.0
+    assert len(positions) == 2
+
+
+def test_find_duplicates_groups_same_size_and_duration(repo):
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\v\a.mp4", file_size=1000, duration=60.0),
+        _mk("copy_a.mp4", r"D:\v\copy_a.mp4", file_size=1000, duration=59.8),
+        _mk("b.mp4", r"D:\v\b.mp4", file_size=1000, duration=120.0),
+        _mk("c.mp4", r"D:\v\c.mp4", file_size=2000, duration=60.0),
+        _mk("d.mp4", r"D:\v\d.mp4", file_size=1000, duration=70.0),
+        _mk("e.mp4", r"D:\v\e.mp4", file_size=0, duration=60.0),
+    ])
+
+    dups = repo.find_duplicates()
+    assert len(dups) == 1
+    group = sorted(v.filename for v in dups[0])
+    assert group == ["a.mp4", "copy_a.mp4"], (
+        "same size + durations within 2s group; different size/duration stay apart"
+    )
+
+
+def test_find_duplicates_respects_tolerance(repo):
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\v\a.mp4", file_size=1000, duration=60.0),
+        _mk("far.mp4", r"D:\v\far.mp4", file_size=1000, duration=70.0),
+    ])
+    assert repo.find_duplicates(tolerance=2.0) == []
+    assert len(repo.find_duplicates(tolerance=20.0)) == 1

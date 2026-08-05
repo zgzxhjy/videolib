@@ -47,6 +47,8 @@ class PlayerWindow(QWidget):
         self._resume_pos = 0.0
         self._rate_idx = self.RATES.index(1.0)
         self._rate = 1.0
+        self._muted = False
+        self._loop_mode = 0  # 0 off, 1 single, 2 all
 
         self.setWindowTitle(self._video.filename)
         self.resize(960, 560)
@@ -69,6 +71,10 @@ class PlayerWindow(QWidget):
         self.btn_stop.clicked.connect(self._stop)
         self.btn_rate = QPushButton(self._rate_label())
         self.btn_rate.clicked.connect(self._cycle_rate)
+        self.btn_mute = QPushButton("静音")
+        self.btn_mute.clicked.connect(self._toggle_mute)
+        self.btn_loop = QPushButton(self._loop_label())
+        self.btn_loop.clicked.connect(self._cycle_loop)
         self.time_label = QLabel("00:00 / 00:00")
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -87,6 +93,8 @@ class PlayerWindow(QWidget):
         controls.addWidget(self.btn_play)
         controls.addWidget(self.btn_stop)
         controls.addWidget(self.btn_rate)
+        controls.addWidget(self.btn_mute)
+        controls.addWidget(self.btn_loop)
         controls.addWidget(self.time_label)
         controls.addWidget(self.slider, 1)
         controls.addWidget(QLabel("音量"))
@@ -151,6 +159,18 @@ class PlayerWindow(QWidget):
     def _rate_label(self) -> str:
         return f"倍速 {self._rate:g}x"
 
+    def _toggle_mute(self) -> None:
+        self._muted = not self._muted
+        self.audio.setMuted(self._muted)
+        self.btn_mute.setText("已静音" if self._muted else "静音")
+
+    def _cycle_loop(self) -> None:
+        self._loop_mode = (self._loop_mode + 1) % 3
+        self.btn_loop.setText(self._loop_label())
+
+    def _loop_label(self) -> str:
+        return ("循环:关", "循环:单曲", "循环:全部")[self._loop_mode]
+
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
             self.showNormal()
@@ -187,10 +207,18 @@ class PlayerWindow(QWidget):
         if self._closing:
             return
         if status == _MEDIA_END:
-            if self._queue_index < len(self._queue) - 1:
+            if self._loop_mode == 1:
+                # single loop: mark finished, replay the same video
+                self._repo.record_play(self._video.id, 0.0)
+                self._load(self._queue_index)
+            elif self._queue_index < len(self._queue) - 1:
                 # natural end: record the finished video, then roll on
                 self._repo.record_play(self._video.id, 0.0)
                 self._load(self._queue_index + 1)
+            elif self._loop_mode == 2:
+                # all loop: wrap back to the first video
+                self._repo.record_play(self._video.id, 0.0)
+                self._load(0)
             else:
                 self._finish(0.0)
         elif status == _MEDIA_LOADED:
@@ -231,6 +259,14 @@ class PlayerWindow(QWidget):
             return
         if key == Qt.Key.Key_R:
             self._cycle_rate()
+            event.accept()
+            return
+        if key == Qt.Key.Key_M:
+            self._toggle_mute()
+            event.accept()
+            return
+        if key == Qt.Key.Key_L:
+            self._cycle_loop()
             event.accept()
             return
         super().keyPressEvent(event)

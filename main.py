@@ -26,6 +26,12 @@ def main() -> int:
     except OSError:
         pass
     repo = Repository(config.DB_PATH)
+    try:
+        from services.backup import backup_db
+
+        backup_db(repo)
+    except OSError:
+        pass  # backup is best-effort; never block startup on it
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
     icon_path = resolve_icon_path()
