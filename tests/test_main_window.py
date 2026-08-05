@@ -243,6 +243,64 @@ def test_delete_files_moves_to_trash_then_removes(qapp, app_env, monkeypatch):
         w.close()
 
 
+def test_clear_play_history_wipes_recent_and_resume(qapp, app_env, monkeypatch):
+    """Clearing play history must empty the recent view and drop resume points."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from ui.video_list import ViewKind
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    app_env.record_play(a.id, 42.0)
+
+    w = _make_window(app_env)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    try:
+        qapp.processEvents()
+        m = w.model
+        w._set_view(ViewKind.RECENT)
+        assert m.rowCount() == 1
+        assert app_env.last_position(a.id) == 42.0
+
+        w._clear_play_history()
+        qapp.processEvents()
+        assert app_env.recent_plays(limit=10) == []
+        assert app_env.last_position(a.id) == 0.0
+        assert m.rowCount() == 0, "recent view must refresh to empty"
+        assert "已清空播放历史" in w.statusBar().currentMessage()
+
+        m.show(ViewKind.ALL)
+        assert not m.data(m.index(0, 2)).startswith("⏵"), "resume marker must vanish"
+    finally:
+        w.close()
+
+
+def test_clear_play_history_refused_keeps_data(qapp, app_env, monkeypatch):
+    """A declined confirm box must not touch play history."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    app_env.record_play(a.id, 42.0)
+
+    w = _make_window(app_env)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+    )
+    try:
+        qapp.processEvents()
+        w._clear_play_history()
+        qapp.processEvents()
+        assert app_env.last_position(a.id) == 42.0
+        assert len(app_env.recent_plays(limit=10)) == 1
+    finally:
+        w.close()
+
+
 def test_confirm_delete_refused_keeps_everything(qapp, app_env, monkeypatch):
     """A declined confirm box must not remove rows or files."""
     from PyQt6.QtWidgets import QMessageBox

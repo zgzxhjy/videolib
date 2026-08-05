@@ -122,6 +122,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 断点标记（会话 5）：last_positions 批量查询 + 时长列 ⏵ 前缀（5s < pos < 90% 时长）+ tooltip 续播位置
 - [x] 播放队列（会话 5）：PlayerWindow(queue=...) + ⏮⎭ 按钮 + 自然结束自动续播（EndOfMedia 非最后一条则 record_play(0) 后 _load 下一条，_closing 防误触发）
 - [x] 最近播放去重（会话 6）：play_history 每视频一行（video_id UNIQUE），record_play 改 UPDATE-then-INSERT（rowid 自增式 bump 保持同秒排序），老库自动去重迁移（保留每视频 MAX(id) 行=最新一次播放）；last_position/last_positions 简化（恒一行）
+- [x] 清空播放历史（会话 6）：工具栏「清空播放历史」按钮（紧挨「最近播放」）+ QMessageBox.question 二次确认；`Repository.clear_play_history()`（DELETE 全表，断点续播位置一并清除，不经 FTS）；`_refresh_all` 后 RECENT 视图即时变空、⏵ 标记消失；测试 88 用例
 - [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
 
 ## 8. 遗留问题（如遇到优先排查）

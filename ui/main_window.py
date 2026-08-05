@@ -220,6 +220,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
+        tb.addAction("清空播放历史", self._clear_play_history)
         self._favorites_menu = QMenu(self)
         self._favorites_action = tb.addAction("收藏夹")
         self._favorites_action.setMenu(self._favorites_menu)
@@ -287,6 +288,19 @@ class MainWindow(QMainWindow):
         if roots:
             self._history_menu.addSeparator()
             self._history_menu.addAction("删除历史记录...", self._delete_scan_roots)
+
+    def _clear_play_history(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "清空播放历史",
+            "确定清空全部播放历史？\n"
+            "最近播放列表将为空，所有视频的断点续播位置也会一并清除，且无法恢复！",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._repo.clear_play_history()
+        self._refresh_all()
+        self.statusBar().showMessage("已清空播放历史")
 
     def _delete_scan_roots(self) -> None:
         dialog = PickScanRootDialog(self._repo, parent=self)

@@ -708,6 +708,12 @@ class Repository:
                 )
             self._conn.commit()
 
+    def clear_play_history(self) -> None:
+        """Wipe all play history; also drops every resume position."""
+        with self._lock:
+            self._conn.execute("DELETE FROM play_history")
+            self._conn.commit()
+
     def last_position(self, video_id: int) -> float:
         with self._lock:
             row = self._conn.execute(
