@@ -708,6 +708,51 @@ class Repository:
                 )
             self._conn.commit()
 
+    def stats(self) -> dict:
+        """Library overview: totals, per-root counts, per-category counts."""
+        with self._lock:
+            totals = self._conn.execute(
+                """SELECT COUNT(*) AS count,
+                          COALESCE(SUM(duration), 0) AS duration,
+                          COALESCE(SUM(file_size), 0) AS size
+                   FROM videos"""
+            ).fetchone()
+            cats = self._conn.execute(
+                """SELECT c.name, COUNT(vc.video_id) AS count
+                   FROM categories c
+                   LEFT JOIN video_categories vc ON vc.category_id = c.id
+                   GROUP BY c.id ORDER BY c.name"""
+            ).fetchall()
+        roots = []
+        for root in self.get_scan_roots():
+            roots.append((root, self.count_in_root(root)))
+        return {
+            "count": totals["count"],
+            "duration": totals["duration"],
+            "size": totals["size"],
+            "roots": roots,
+            "categories": [(r["name"], r["count"]) for r in cats],
+        }
+
+    def count_in_root(self, root: str) -> int:
+        prefix = os.path.normpath(root) + os.sep
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*) AS c FROM videos
+                   WHERE substr(filepath, 1, length(?)) = ?""",
+                (prefix, prefix),
+            ).fetchone()
+            return row["c"]
+
+    def clear_play_position(self, video_id: int) -> None:
+        """Forget the resume point; the recent-play entry stays."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE play_history SET position = 0 WHERE video_id = ?",
+                (video_id,),
+            )
+            self._conn.commit()
+
     def clear_play_history(self) -> None:
         """Wipe all play history; also drops every resume position."""
         with self._lock:

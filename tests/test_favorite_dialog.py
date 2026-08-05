@@ -108,6 +108,27 @@ def test_pick_favorite_list_delete_mode(qapp, fav_env, monkeypatch):
     assert fav_env.get_favorite_lists() == []
 
 
+def test_category_tree_drop_assigns_videos(qapp, fav_env):
+    """Dropping video ids on a category must assign them."""
+    from ui.category_tree import CategoryTree
+
+    _mk_video(fav_env, r"D:\v\a.mp4")
+    _mk_video(fav_env, r"D:\v\b.mp4")
+    a = fav_env.get_by_path(r"D:\v\a.mp4")
+    b = fav_env.get_by_path(r"D:\v\b.mp4")
+    cat = fav_env.add_category("动作", root=r"D:\v")
+
+    tree = CategoryTree(fav_env)
+    try:
+        tree._assign_dropped(cat.id, [a.id, b.id])
+        got = {v.id for v in fav_env.videos_in_category(cat.id)}
+        assert got == {a.id, b.id}
+        direct = {v.id for v in fav_env.videos_in_category(cat.id, include_descendants=False)}
+        assert direct == got
+    finally:
+        tree.close()
+
+
 def test_pick_scan_root_dialog(qapp, fav_env, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 

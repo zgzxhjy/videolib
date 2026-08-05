@@ -281,6 +281,35 @@ def test_play_history_migration_dedupes(tmp_path):
         repo.close()
 
 
+def test_clear_play_position_keeps_recent_entry(repo):
+    repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4", duration=100.0)])
+    a = repo.get_by_path(r"D:\v\a.mp4")
+    repo.record_play(a.id, 42.0)
+    repo.clear_play_position(a.id)
+    assert repo.last_position(a.id) == 0.0, "resume point must be forgotten"
+    assert len(repo.recent_plays(limit=10)) == 1, "recent entry must stay"
+
+
+def test_stats_aggregates(repo):
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\x\a.mp4", duration=60.0, file_size=1000),
+        _mk("b.mp4", r"D:\x\sub\b.mp4", duration=30.0, file_size=2000),
+        _mk("c.mp4", r"D:\y\c.mp4", duration=10.0, file_size=4000),
+    ])
+    a = repo.get_by_path(r"D:\x\a.mp4")
+    cat = repo.add_category("动作", root=r"D:\x")
+    repo.assign_category(a.id, cat.id)
+    repo.register_scan(r"D:\x")
+    repo.register_scan(r"D:\y")
+
+    s = repo.stats()
+    assert s["count"] == 3
+    assert s["duration"] == 100.0
+    assert s["size"] == 7000
+    assert dict(s["roots"]) == {r"D:\x": 2, r"D:\y": 1}
+    assert s["categories"] == [("动作", 1)]
+
+
 def test_upsert_persists_mtime(repo):
     repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4", file_mtime=1234.5)])
     assert repo.get_by_path(r"D:\v\a.mp4").file_mtime == 1234.5

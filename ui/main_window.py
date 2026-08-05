@@ -1,10 +1,12 @@
 import os
 import subprocess
+from pathlib import Path
 
 from PyQt6.QtCore import QByteArray, QFile, QSize, Qt, QThread, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFileDialog,
     QHeaderView,
     QInputDialog,
@@ -74,6 +76,7 @@ class MainWindow(QMainWindow):
         self._cleanup_thread: _OrphanCleanupThread | None = None
         self.setWindowTitle(f"{config.APP_NAME} - 视频管理")
         self.resize(1100, 700)
+        self.setAcceptDrops(True)
 
         self._build_toolbar()
         self._build_body()
@@ -217,6 +220,7 @@ class MainWindow(QMainWindow):
         self._history_action = tb.addAction("历史目录")
         self._history_action.setMenu(self._history_menu)
         tb.addAction("刷新", self._refresh_all)
+        tb.addAction("统计", self._show_stats)
         tb.addSeparator()
         tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
@@ -384,7 +388,64 @@ class MainWindow(QMainWindow):
         self.tree.reload()
         self._set_view(self._view)
 
+    def _show_stats(self) -> None:
+        from ui.video_list import _fmt_duration, _fmt_size
+
+        s = self._repo.stats()
+        lines = [
+            f"视频总数: {s['count']}",
+            f"总时长: {_fmt_duration(s['duration'])}",
+            f"总大小: {_fmt_size(s['size'])}",
+        ]
+        if s["roots"]:
+            lines.append("")
+            lines.append("各目录:")
+            for root, count in s["roots"]:
+                lines.append(f"  {root} ({count})")
+        if s["categories"]:
+            lines.append("")
+            lines.append("分类:")
+            for name, count in s["categories"]:
+                lines.append(f"  {name} ({count})")
+        QMessageBox.information(self, "库统计", "\n".join(lines))
+
     # ---------- actions ----------
+
+    def dragEnterEvent(self, event) -> None:
+        if any(
+            self._is_droppable(u.toLocalFile())
+            for u in event.mimeData().urls()
+            if u.toLocalFile()
+        ):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
+        if not paths:
+            super().dropEvent(event)
+            return
+        dirs, videos = self._handle_dropped_paths(paths)
+        for d in dirs:
+            self._start_scan(d)
+        if videos:
+            Library(self._repo).apply_sync(videos, [])
+            self._refresh_all()
+            self.statusBar().showMessage(f"已添加 {len(videos)} 个视频")
+        event.acceptProposedAction()
+
+    def _is_droppable(self, path: str) -> bool:
+        return os.path.isdir(path) or Path(path).suffix.lower() in config.VIDEO_EXTENSIONS
+
+    def _handle_dropped_paths(self, paths: list[str]) -> tuple[list[str], list[str]]:
+        dirs, videos = [], []
+        for p in paths:
+            if os.path.isdir(p):
+                dirs.append(p)
+            elif os.path.isfile(p) and Path(p).suffix.lower() in config.VIDEO_EXTENSIONS:
+                videos.append(p)
+        return dirs, videos
 
     def _pick_and_scan(self) -> None:
         root = QFileDialog.getExistingDirectory(self, "选择要扫描的视频目录")
@@ -526,10 +587,27 @@ class MainWindow(QMainWindow):
         menu.addAction("从分类移除...", lambda: self._unassign_category(videos))
         menu.addSeparator()
         menu.addAction("打开所在文件夹", lambda: self._reveal(videos[0]))
+        menu.addAction("✔ 标记为已看完", lambda: self._mark_finished(videos))
+        menu.addAction("复制路径", lambda: self._copy_paths(videos))
+        menu.addAction("复制文件名", lambda: self._copy_names(videos))
         menu.addSeparator()
         menu.addAction("从库中移除", lambda: self._remove_from_library(videos))
         menu.addAction("删除文件并移入回收站...", lambda: self._delete_files(videos))
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _mark_finished(self, videos: list[Video]) -> None:
+        for v in videos:
+            self._repo.clear_play_position(v.id)
+        self.model.show(self._view, **self._view_ctx())
+        self.statusBar().showMessage(f"已标记 {len(videos)} 个视频为已看完")
+
+    def _copy_paths(self, videos: list[Video]) -> None:
+        QApplication.clipboard().setText("\n".join(v.filepath for v in videos))
+        self.statusBar().showMessage(f"已复制 {len(videos)} 个路径")
+
+    def _copy_names(self, videos: list[Video]) -> None:
+        QApplication.clipboard().setText("\n".join(v.filename for v in videos))
+        self.statusBar().showMessage(f"已复制 {len(videos)} 个文件名")
 
     def _remove_from_library(self, videos: list[Video]) -> None:
         """Drop the rows (and thumbnails) but keep the files on disk."""

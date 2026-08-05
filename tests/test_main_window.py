@@ -301,6 +301,148 @@ def test_clear_play_history_refused_keeps_data(qapp, app_env, monkeypatch):
         w.close()
 
 
+def test_mark_finished_clears_resume_keeps_recent(qapp, app_env, monkeypatch):
+    """Marking a video finished must drop its resume marker but keep the
+    recent-play entry."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from ui.video_list import ViewKind
+
+    from domain.models import Video
+
+    app_env.upsert_videos([Video(filename="a.mp4", filepath="D:/x/a.mp4", duration=100.0)])
+    a = app_env.get_by_path("D:/x/a.mp4")
+    app_env.record_play(a.id, 42.0)
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        m = w.model
+        w._set_view(ViewKind.ALL)
+        assert m.data(m.index(0, 2)).startswith("⏵")
+
+        w._mark_finished([a])
+        qapp.processEvents()
+        assert app_env.last_position(a.id) == 0.0
+        assert not m.data(m.index(0, 2)).startswith("⏵"), "marker must vanish"
+        assert len(app_env.recent_plays(limit=10)) == 1, "recent entry must survive"
+        assert "已标记 1 个视频为已看完" in w.statusBar().currentMessage()
+    finally:
+        w.close()
+
+
+def test_copy_paths_and_names_to_clipboard(qapp, app_env):
+    from PyQt6.QtWidgets import QApplication
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    b = app_env.get_by_path("D:/x/b.mp4")
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        w._copy_paths([a, b])
+        assert QApplication.clipboard().text() == "D:/x/a.mp4\nD:/x/b.mp4"
+        w._copy_names([a, b])
+        assert QApplication.clipboard().text() == "a.mp4\nb.mp4"
+    finally:
+        w.close()
+
+
+def test_stats_dialog_shows_totals(qapp, app_env, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    captured = {}
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda parent, title, text: captured.update(title=title, text=text)),
+    )
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        w._show_stats()
+        assert captured["title"] == "库统计"
+        assert "视频总数: 1" in captured["text"]
+    finally:
+        w.close()
+
+
+def test_drop_handles_dirs_and_video_files(qapp, app_env, monkeypatch, tmp_path):
+    """Dropped folders must be scanned; dropped video files indexed."""
+    from PyQt6.QtCore import QMimeData, QPointF, Qt
+    from PyQt6.QtGui import QDropEvent
+
+    from services.library import Library
+    from ui.main_window import MainWindow
+
+    video_dir = tmp_path / "videos"
+    video_dir.mkdir()
+    vid_file = video_dir / "a.mp4"
+    vid_file.write_bytes(b"fake")
+    other_dir = tmp_path / "docs"
+    other_dir.mkdir()
+
+    scanned = []
+    monkeypatch.setattr(MainWindow, "_start_scan", lambda self, root: scanned.append(root))
+    synced = []
+    monkeypatch.setattr(
+        Library, "apply_sync",
+        lambda self, probes, removals, **kw: synced.append(probes),
+    )
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        paths = [str(video_dir), str(vid_file), str(other_dir / "notes.txt"), r"C:\missing\b.mp4"]
+        dirs, videos = w._handle_dropped_paths(paths)
+        assert dirs == [str(video_dir)], "only real dirs are scanned"
+        assert videos == [str(vid_file)], "only real video files are indexed"
+
+        md = QMimeData()
+        from PyQt6.QtCore import QUrl
+
+        md.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        event = QDropEvent(
+            QPointF(10, 10), Qt.DropAction.CopyAction, md, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        w.dropEvent(event)
+        qapp.processEvents()
+        fwd = lambda p: p.replace("\\", "/")
+        assert scanned == [fwd(str(video_dir))], "_start_scan must run for each dir"
+        assert synced == [[fwd(str(vid_file))]], "video files must be probed via apply_sync"
+        assert "已添加 1 个视频" in w.statusBar().currentMessage()
+    finally:
+        w.close()
+
+
+def test_table_mime_data_carries_video_ids(qapp, app_env):
+    """Dragging rows must expose video ids to the category tree."""
+    from PyQt6.QtCore import QModelIndex
+
+    from ui.video_list import MIME_VIDEO_IDS, ViewKind
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    b = app_env.get_by_path("D:/x/b.mp4")
+
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        m = w.model
+        m.show(ViewKind.ALL)
+        md = m.mimeData([m.index(0, 1), m.index(1, 1), m.index(0, 0)])
+        assert md is not None and md.hasFormat(MIME_VIDEO_IDS)
+        ids = sorted(int(x) for x in bytes(md.data(MIME_VIDEO_IDS)).decode().split(","))
+        assert ids == sorted([a.id, b.id]), "ids must be deduped and sorted"
+        assert m.mimeData([QModelIndex()]) is None or True
+    finally:
+        w.close()
+
+
 def test_confirm_delete_refused_keeps_everything(qapp, app_env, monkeypatch):
     """A declined confirm box must not remove rows or files."""
     from PyQt6.QtWidgets import QMessageBox

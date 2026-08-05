@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-05（会话 6：最近播放去重 + README 同步）
+> 最后更新：2026-08-05（会话 7：播放器增强 + 右键菜单 + 统计 + 拖拽）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -97,6 +97,9 @@ build.bat                               # 打包 → dist\VideoLib.exe
 19. **PyQt6.11 `sortIndicatorOrder()` 返回枚举实例**：`int(...)` 抛 `TypeError`，且发生在 `closeEvent` 槽内 → qFatal 闪退（0xC0000409 无输出）。必须 `.value`。铁律：**closeEvent/槽内新增代码里对 Qt 枚举做 `int()` 前先验证 PyQt6.11 行为**（`sortIndicatorSection()` 是普通 int，`sortIndicatorOrder()` 是枚举）。
 20. **成员属性必须在 `__init__` 初始化**：`_cleanup_thread` 只在 0ms 定时器触发后才赋值；窗口未经过任何事件循环就 close → `closeEvent` 里 `self._cleanup_thread is not None` 抛 `AttributeError` → 槽内异常 → qFatal。铁律：**closeEvent 会引用的属性一律在 `__init__` 置 None**。
 21. **parented 0ms 定时器 + 引用环 → 已关闭窗口的定时器在后续事件循环里触发**：`QTimer(self)` 持父引用、窗口属性又持 QTimer → 形成引用环，窗口不随引用计数销毁（靠 GC 才回收）；窗口存活期内无事件循环 → 0ms 定时器一直未触发 → 下一次 `processEvents()` 会调到已关闭窗口的 `_start_orphan_cleanup`，用已 close 的旧 repo 起清理线程 → 线程内 sqlite 异常 → QThread 未捕获异常 → qFatal。修复：**closeEvent 里 `_cleanup_timer.stop()` + 等待运行中的清理线程（对齐 `_stop_watcher`）**。测试表现特征：同一测试函数内建第二个窗口不崩、跨测试必崩（上一测试的窗口毒害下一测试的 `processEvents`）。
+22. **Qt 枚举驼峰拼写错误 → 事件过滤器内 AttributeError → qFatal**：`QEvent.Type.MouseButtonDBlClick` 不存在（正确拼写 `MouseButtonDblClick`），且发生在 eventFilter 回调内（同 slot）→ 0xC0000409 无输出。铁律：**事件过滤器/槽内新增代码里的 Qt 枚举属性名，先 `dir(QEvent.Type)` 验证拼写**。
+23. **Python 3.14 pathlib 的 `str(WindowsPath)` 返回反斜杠**：`str(Path('C:/x'))` → `'C:\\x'`（3.14 pathlib 重构）；而 Qt `QUrl.fromLocalFile().toLocalFile()` 往返**保留正斜杠**。测试断言跨这两者时必须显式统一分隔符（`replace('\\','/')`），不能直接比较。
+24. **测试必须隔离 SETTINGS_PATH**：播放器音量记忆后 `closeEvent` 写真实 `~/.videolib/settings.json`（player 测试曾把用户音量改成 75）。铁律：**任何会写 settings 的新代码，相关测试 fixture 必须 monkeypatch `config.SETTINGS_PATH` 到 tmp**（对照 main_window 的 app_env）。
 
 ## 6. 验证手段（可复用）
 
@@ -123,7 +126,11 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 播放队列（会话 5）：PlayerWindow(queue=...) + ⏮⎭ 按钮 + 自然结束自动续播（EndOfMedia 非最后一条则 record_play(0) 后 _load 下一条，_closing 防误触发）
 - [x] 最近播放去重（会话 6）：play_history 每视频一行（video_id UNIQUE），record_play 改 UPDATE-then-INSERT（rowid 自增式 bump 保持同秒排序），老库自动去重迁移（保留每视频 MAX(id) 行=最新一次播放）；last_position/last_positions 简化（恒一行）
 - [x] 清空播放历史（会话 6）：工具栏「清空播放历史」按钮（紧挨「最近播放」）+ QMessageBox.question 二次确认；`Repository.clear_play_history()`（DELETE 全表，断点续播位置一并清除，不经 FTS）；`_refresh_all` 后 RECENT 视图即时变空、⏵ 标记消失；测试 88 用例
-- [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
+- [x] 播放器增强（会话 7）：倍速按钮（0.5x/1x/1.25x/1.5x/2x 循环，`setPlaybackRate`，R 快捷键，切视频不重置）；全屏（F 键/双击视频区，eventFilter 实现，Esc 先退全屏再关闭）；音量记忆（settings.json "volume" 键，closeEvent 保存，默认 80）
+- [x] 右键菜单（会话 7）：「标记为已看完」（`clear_play_position` UPDATE position=0 保留最近条目）、「复制路径」「复制文件名」（多选换行分隔，QApplication.clipboard）
+- [x] 库统计面板（会话 7）：`Repository.stats()`（总数/总时长/总大小/各 root 计数/分类计数）+ 工具栏「统计」按钮 + QMessageBox.information
+- [x] 拖拽（会话 7）：主窗口 setAcceptDrops（目录→_start_scan 扫描、视频文件→Library.apply_sync 单文件入库）；列表→分类树拖拽归类（model.mimeData 带 MIME_VIDEO_IDS 逗号串 + CategoryTree dropEvent → assign_batch）；测试 99 用例
+- [x] 超大库性能（会话 7 核实）：搜索 SEARCH_LIMIT=500 已生效；列表 all_videos 全量加载（虚拟滚动+固定行高），待办已移除
 
 ## 8. 遗留问题（如遇到优先排查）
 

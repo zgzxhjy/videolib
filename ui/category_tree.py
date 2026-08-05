@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 from domain.repository import Repository
+from ui.video_list import MIME_VIDEO_IDS
 
 
 class CategoryTree(QTreeWidget):
@@ -29,6 +30,7 @@ class CategoryTree(QTreeWidget):
         self.customContextMenuRequested.connect(self._show_menu)
         self.itemExpanded.connect(lambda _: self._cache_expanded())
         self.itemCollapsed.connect(lambda _: self._cache_expanded())
+        self.setAcceptDrops(True)
         self._expanded: set[int] = set()
         self.reload(self._root)
 
@@ -119,3 +121,37 @@ class CategoryTree(QTreeWidget):
             self._repo.delete_category(cid)
             self.reload()
             self.category_selected.emit(None)
+
+    # ---------- drop target for rows dragged from the video list ----------
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(MIME_VIDEO_IDS):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat(MIME_VIDEO_IDS):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if not event.mimeData().hasFormat(MIME_VIDEO_IDS):
+            super().dropEvent(event)
+            return
+        ids = [
+            int(x) for x in bytes(event.mimeData().data(MIME_VIDEO_IDS)).decode().split(",") if x
+        ]
+        item = self.itemAt(event.position().toPoint())
+        cid = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if not ids or cid is None:
+            event.ignore()
+            return
+        self._assign_dropped(cid, ids)
+        event.acceptProposedAction()
+
+    def _assign_dropped(self, category_id: int, video_ids: list[int]) -> None:
+        self._repo.assign_batch(video_ids, category_id)
+        self.reload()
+        self.category_selected.emit(category_id)

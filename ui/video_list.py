@@ -5,6 +5,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import (
     QAbstractTableModel,
+    QByteArray,
+    QMimeData,
     QModelIndex,
     QRunnable,
     QSize,
@@ -27,6 +29,8 @@ from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
 
 COL_THUMB = 0
 COL_PLAY = 6
+
+MIME_VIDEO_IDS = "application/x-videolib-video-ids"
 
 
 class ViewKind(StrEnum):
@@ -117,6 +121,7 @@ class PlayTableView(QTableView):
         self._hover_row: int | None = None
         self._press_row: int | None = None
         self.setMouseTracking(True)
+        self.setDragEnabled(True)
 
     def setModel(self, model) -> None:
         super().setModel(model)
@@ -288,6 +293,17 @@ class VideoTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             return self.COLUMNS[section]
         return None
+
+    def mimeTypes(self) -> list[str]:
+        return [MIME_VIDEO_IDS]
+
+    def mimeData(self, indexes) -> QMimeData | None:
+        ids = sorted({self._videos[i.row()].id for i in indexes if i.isValid() and i.column() == 1})
+        if not ids:
+            return None
+        md = QMimeData()
+        md.setData(MIME_VIDEO_IDS, QByteArray(",".join(str(i) for i in ids).encode()))
+        return md
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
