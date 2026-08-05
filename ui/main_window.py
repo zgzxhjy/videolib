@@ -382,6 +382,8 @@ class MainWindow(QMainWindow):
         self._view = view
         self.search.clear()
         self.tree.clearSelection()
+        if view == VIEW_ALL:
+            self.tree.reload("")
         self.model.show(view, **self._view_ctx())
 
     def _refresh_all(self) -> None:

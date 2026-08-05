@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import (
 from domain.repository import Repository
 from ui.video_list import MIME_VIDEO_IDS
 
+_ROOT_ROLE = int(Qt.ItemDataRole.UserRole) + 1  # holds the scan root of a category item
+
 
 class CategoryTree(QTreeWidget):
     """Hierarchical category sidebar for one scan root. Emits categorySelected(None) for root view."""
@@ -47,22 +49,37 @@ class CategoryTree(QTreeWidget):
         root_item.setExpanded(True)
         self.addTopLevelItem(root_item)
 
-        cats = self._repo.get_categories(self._root)
-        by_parent: dict[int | None, list] = {}
+        cats = self._repo.get_categories(self._root or None)
+        by_parent: dict[tuple[str, int | None], list] = {}
         for c in cats:
-            by_parent.setdefault(c.parent_id, []).append(c)
-        self._add_children(root_item, by_parent, None)
+            by_parent.setdefault((c.root, c.parent_id), []).append(c)
+
+        if self._root:
+            # single scan root: its categories hang directly off the root item
+            self._add_children(root_item, by_parent, None, self._root)
+        else:
+            # all-dirs view: group categories under one node per scan root
+            for group_root in sorted({r for r, _p in by_parent}):
+                group = QTreeWidgetItem([os.path.basename(os.path.normpath(group_root)) or group_root])
+                group.setData(0, Qt.ItemDataRole.UserRole, group_root)
+                group.setData(0, _ROOT_ROLE, group_root)
+                group.setToolTip(0, group_root)
+                root_item.addChild(group)
+                self._add_children(group, by_parent, None, group_root)
 
         self.blockSignals(False)
 
-    def _add_children(self, parent_item: QTreeWidgetItem, by_parent: dict, parent_id: int | None) -> None:
-        for c in sorted(by_parent.get(parent_id, []), key=lambda c: c.name):
+    def _add_children(
+        self, parent_item: QTreeWidgetItem, by_parent: dict, parent_id: int | None, root: str
+    ) -> None:
+        for c in sorted(by_parent.get((root, parent_id), []), key=lambda c: c.name):
             item = QTreeWidgetItem([c.name])
             item.setData(0, Qt.ItemDataRole.UserRole, c.id)
+            item.setData(0, _ROOT_ROLE, c.root)
             parent_item.addChild(item)
             if c.id in self._expanded:
                 item.setExpanded(True)
-            self._add_children(item, by_parent, c.id)
+            self._add_children(item, by_parent, c.id, root)
 
     def _cache_expanded(self) -> None:
         self._expanded = set()
@@ -70,27 +87,35 @@ class CategoryTree(QTreeWidget):
         while it.value():
             item = it.value()
             cid = item.data(0, Qt.ItemDataRole.UserRole)
-            if cid is not None and item.isExpanded():
+            if isinstance(cid, int) and item.isExpanded():
                 self._expanded.add(cid)
             it += 1
 
     # ---------- interaction ----------
 
     def _on_click(self, item: QTreeWidgetItem, _col: int) -> None:
-        self.category_selected.emit(item.data(0, Qt.ItemDataRole.UserRole))
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is None or isinstance(data, int):
+            self.category_selected.emit(data)
 
     def _selected_category(self) -> tuple[QTreeWidgetItem, int | None]:
         item = self.currentItem()
         if item is None:
             return None, None
-        return item, item.data(0, Qt.ItemDataRole.UserRole)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        return item, data if isinstance(data, int) else None
 
     def _show_menu(self, pos) -> None:
-        item, cid = self._selected_category()
+        item = self.currentItem()
         menu = QMenu(self)
         act_add = menu.addAction("新建子分类")
         act_rename = menu.addAction("重命名")
         act_del = menu.addAction("删除")
+        cid = None
+        if item is not None:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(data, int):
+                cid = data
         if cid is None:
             act_rename.setEnabled(False)
             act_del.setEnabled(False)
@@ -106,7 +131,10 @@ class CategoryTree(QTreeWidget):
         name, ok = QInputDialog.getText(self, "新建分类", "分类名称:")
         if not ok or not name.strip():
             return
-        self._repo.add_category(name.strip(), parent_id, root=self._root)
+        root = self._root
+        if parent_item is not None:
+            root = parent_item.data(0, _ROOT_ROLE) or self._root
+        self._repo.add_category(name.strip(), parent_id, root=root)
         self.reload()
 
     def _rename(self, item: QTreeWidgetItem, cid: int) -> None:
@@ -144,7 +172,8 @@ class CategoryTree(QTreeWidget):
             int(x) for x in bytes(event.mimeData().data(MIME_VIDEO_IDS)).decode().split(",") if x
         ]
         item = self.itemAt(event.position().toPoint())
-        cid = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        cid = data if isinstance(data, int) else None
         if not ids or cid is None:
             event.ignore()
             return

@@ -21,6 +21,7 @@ class Category:
     id: int = 0
     name: str = ""
     parent_id: int | None = None
+    root: str = ""
     created_at: datetime = field(default_factory=datetime.now)
 
 

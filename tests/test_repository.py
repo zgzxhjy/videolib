@@ -356,6 +356,31 @@ def test_remove_scan_root_keeps_videos(repo):
     assert repo.get_by_path(r"D:\a\a.mp4") is not None
 
 
+def test_register_scan_child_skipped_when_parent_exists(repo):
+    repo.register_scan(r"D:\a")
+    repo.register_scan(r"D:\a\b")
+    assert repo.get_scan_roots() == [r"D:\a"]
+
+
+def test_register_scan_parent_removes_children(repo):
+    repo.register_scan(r"D:\a\b")
+    repo.register_scan(r"D:\a\b\c")
+    repo.register_scan(r"D:\a")
+    assert repo.get_scan_roots() == [r"D:\a"]
+
+
+def test_remove_scan_root_cascades_children(repo):
+    repo.register_scan(r"D:\a")
+    repo.register_scan(r"D:\a\b")
+    repo.register_scan(r"D:\b")
+    repo.remove_scan_root(r"D:\a")
+    assert repo.get_scan_roots() == [r"D:\b"]
+
+    repo.register_scan(r"D:\a\b")
+    repo.remove_scan_root(r"D:\a\b")
+    assert repo.get_scan_roots() == [r"D:\b"]
+
+
 def test_remove_videos_under(repo):
     repo.upsert_videos([
         _mk("a.mp4", r"D:\a\a.mp4"),
@@ -373,6 +398,22 @@ def test_remove_videos_under(repo):
     assert repo.count_favorites(lst.id) == 0, "favorite links must cascade"
 
 
+def test_remove_videos_under_removes_category_tree(repo):
+    parent = repo.add_category("甲", root=r"D:\a")
+    repo.add_category("子", parent_id=parent.id, root=r"D:\a")
+    repo.add_category("乙", root=r"D:\a\b")
+    repo.add_category("丙", root=r"D:\b")
+    repo.add_category("未绑定")
+
+    repo.upsert_videos([_mk("a.mp4", r"D:\a\a.mp4")])
+    repo.remove_videos_under(r"D:\a")
+
+    names = [c.name for c in repo.get_categories(None)]
+    assert names == ["丙", "未绑定"], "root's tree and sub-root categories must go"
+    stats_cats = [n for n, _c in repo.stats()["categories"]]
+    assert stats_cats == ["丙", "未绑定"], "stats must not show orphan categories"
+
+
 def test_category_root_scoping(repo):
     repo.add_category("甲", root=r"D:\a")
     repo.add_category("乙", root=r"D:\b")
@@ -380,6 +421,8 @@ def test_category_root_scoping(repo):
     assert [c.name for c in repo.get_categories(r"D:\a")] == ["甲"]
     assert [c.name for c in repo.get_categories(r"D:\b")] == ["乙"]
     assert len(repo.get_categories()) == 3
+    roots = {c.name: c.root for c in repo.get_categories(None)}
+    assert roots == {"甲": r"D:\a", "乙": r"D:\b", "丙": ""}, "Category must carry its root"
 
 
 def test_adopt_legacy_categories(repo):

@@ -76,7 +76,8 @@ class Library:
     def remove_root(self, root: str) -> int:
         """Delete all videos under a scan root, along with their thumbnails.
 
-        Favorites/category links cascade inside the repository.
+        The root's category tree is removed too (categories are scoped to a
+        scan root). Favorites links cascade inside the repository.
         """
         deleted_ids = self._repo.remove_videos_under(root)
         Thumbnailer(self._thumbs_dir).delete_for(deleted_ids)

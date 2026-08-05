@@ -373,12 +373,29 @@ class Repository:
     # ---------- scan roots ----------
 
     def register_scan(self, root: str) -> None:
+        """Register a scan root, keeping parent/child roots mutually exclusive.
+
+        If an ancestor root is already registered the child is redundant (its
+        files are covered by the ancestor's scan) and is skipped. If the new
+        root is an ancestor of registered roots, those child records are
+        dropped before registering it.
+        """
+        root = os.path.normpath(root)
+        nc_root = os.path.normcase(root)
         with self._lock:
+            existing = [r["root"] for r in self._conn.execute("SELECT root FROM scan_roots")]
+            if any(nc_root.startswith(os.path.normcase(r) + os.sep) for r in existing):
+                return
+            children = [r for r in existing if os.path.normcase(r).startswith(nc_root + os.sep)]
+            if children:
+                self._conn.executemany(
+                    "DELETE FROM scan_roots WHERE root = ?", [(c,) for c in children]
+                )
             self._conn.execute(
                 """INSERT INTO scan_roots (root, scanned_at)
                    VALUES (?, CURRENT_TIMESTAMP)
                    ON CONFLICT(root) DO UPDATE SET scanned_at = CURRENT_TIMESTAMP""",
-                (os.path.normpath(root),),
+                (root,),
             )
             self._conn.commit()
 
@@ -390,23 +407,55 @@ class Repository:
             return [r["root"] for r in rows]
 
     def remove_scan_root(self, root: str) -> None:
-        """Forget a scan root. Videos under it are kept."""
+        """Forget a scan root and any sub-roots registered under it.
+
+        Videos are kept. Case-insensitive on Windows (normcase).
+        """
+        root = os.path.normpath(root)
+        nc_root = os.path.normcase(root)
         with self._lock:
-            self._conn.execute("DELETE FROM scan_roots WHERE root = ?", (root,))
+            existing = self._conn.execute("SELECT root FROM scan_roots").fetchall()
+            doomed = [
+                r["root"]
+                for r in existing
+                if os.path.normcase(r["root"]) == nc_root
+                or os.path.normcase(r["root"]).startswith(nc_root + os.sep)
+            ]
+            if doomed:
+                self._conn.executemany(
+                    "DELETE FROM scan_roots WHERE root = ?", [(r,) for r in doomed]
+                )
             self._conn.commit()
 
     def remove_videos_under(self, root: str) -> list[int]:
         """Delete all videos under a scan root, returning the deleted video ids.
 
-        Favorites/category links cascade. Callers must also remove the
-        thumbnails for the returned ids (files would be reused by new rows).
+        Categories belonging to the root (or any sub-root) are removed too —
+        they are scoped to a scan root, so a deleted root must not leave
+        orphan categories behind; children cascade via parent_id.
+        Favorites links cascade. Callers must also remove the thumbnails for
+        the returned ids (files would be reused by new rows).
         """
-        prefix = os.path.normpath(root) + os.sep
+        root = os.path.normpath(root)
+        nc_root = os.path.normcase(root)
+        prefix = root + os.sep
         ids = self._write_videos(
             lambda: self._remove_under(prefix)
         )
+        self._write(lambda: self._remove_categories_under(nc_root))
         self._finish_videos_write()
         return ids
+
+    def _remove_categories_under(self, nc_root: str) -> None:
+        rows = self._conn.execute("SELECT id, root FROM categories").fetchall()
+        doomed = [
+            r["id"]
+            for r in rows
+            if os.path.normcase(r["root"]) == nc_root
+            or os.path.normcase(r["root"]).startswith(nc_root + os.sep)
+        ]
+        for cid in doomed:
+            self._conn.execute("DELETE FROM categories WHERE id = ?", (cid,))
 
     def _remove_under(self, prefix: str) -> list[int]:
         ids = [
@@ -469,7 +518,9 @@ class Repository:
             row = self._conn.execute(
                 "SELECT * FROM categories WHERE id = ?", (cur.lastrowid,)
             ).fetchone()
-            return Category(id=row["id"], name=row["name"], parent_id=row["parent_id"])
+            return Category(
+                id=row["id"], name=row["name"], parent_id=row["parent_id"], root=row["root"]
+            )
 
     def rename_category(self, category_id: int, name: str) -> None:
         with self._lock:
@@ -521,7 +572,9 @@ class Repository:
                     "SELECT * FROM categories WHERE root = ? ORDER BY name", (root,)
                 ).fetchall()
             return [
-                Category(id=r["id"], name=r["name"], parent_id=r["parent_id"])
+                Category(
+                    id=r["id"], name=r["name"], parent_id=r["parent_id"], root=r["root"]
+                )
                 for r in rows
             ]
 
@@ -593,7 +646,10 @@ class Repository:
                    WHERE vc.video_id = ? ORDER BY c.name""",
                 (video_id,),
             ).fetchall()
-            return [Category(id=r["id"], name=r["name"], parent_id=r["parent_id"]) for r in rows]
+            return [
+                Category(id=r["id"], name=r["name"], parent_id=r["parent_id"], root=r["root"])
+                for r in rows
+            ]
 
     # ---------- favorites ----------
 
