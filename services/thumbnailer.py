@@ -97,8 +97,13 @@ class Thumbnailer:
         self._lock = threading.Lock()
         self._pending: set[str] = set()
 
+    @staticmethod
+    def path(thumbs_dir: str | Path, video_id: int) -> Path:
+        """Thumbnail file location: the single source of truth for the formula."""
+        return Path(thumbs_dir) / f"{video_id}.jpg"
+
     def path_for(self, video_id: int) -> Path:
-        return self._dir / f"{video_id}.jpg"
+        return self.path(self._dir, video_id)
 
     def exists(self, video_id: int) -> bool:
         return self.path_for(video_id).exists()

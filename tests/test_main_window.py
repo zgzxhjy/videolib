@@ -152,6 +152,39 @@ def test_count_label_follows_view(qapp, app_env):
         w.close()
 
 
+def test_model_show_maps_views(qapp, app_env):
+    """The view→query mapping must live in VideoTableModel.show()."""
+    from ui.video_list import ViewKind
+
+    _mk_video(app_env, "a.mp4", r"D:\r\a.mp4")
+    _mk_video(app_env, "b.mp4", r"D:\o\b.mp4")
+    lst = app_env.create_favorite_list("收藏夹_默认")
+    a = app_env.get_by_path(r"D:\r\a.mp4")
+    app_env.add_favorite(a.id, lst.id)
+    app_env.record_play(a.id, 30.0)
+    cat = app_env.add_category("动作", root=r"D:\r")
+    app_env.assign_category(a.id, cat.id)
+
+    w = _make_window(app_env)
+    try:
+        m = w.model
+        m.show(ViewKind.ALL)
+        assert m.rowCount() == 2
+        m.show(ViewKind.FAVORITES, favorite_list_id=lst.id)
+        assert m.rowCount() == 1 and m.video_at(0).id == a.id
+        m.show(ViewKind.RECENT)
+        assert m.rowCount() == 1
+        m.show(ViewKind.CURRENT, root=r"D:\r")
+        assert m.rowCount() == 1
+        m.show(ViewKind.ALL, search_text="b")
+        assert m.rowCount() == 1 and m.video_at(0).filename == "b.mp4"
+        m.show(ViewKind.CURRENT, category_id=cat.id, root=r"D:\r")
+        assert m.rowCount() == 1
+        qapp.processEvents()  # let the startup orphan-cleanup timer fire while alive
+    finally:
+        w.close()
+
+
 def test_play_column_fits_button(qapp, app_env):
     """ResizeToContents must not collapse the self-drawn play column (regression: 28px)."""
     _mk_video(app_env, "测试.mp4", "D:/x/测试.mp4")

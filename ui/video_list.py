@@ -1,4 +1,5 @@
 import threading
+from enum import StrEnum
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -25,6 +26,15 @@ from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
 
 COL_THUMB = 0
 COL_PLAY = 6
+
+
+class ViewKind(StrEnum):
+    """The four navigation views over the library."""
+
+    CURRENT = "current"
+    ALL = "all"
+    FAVORITES = "favorites"
+    RECENT = "recent"
 
 
 class ThumbRunnable(QRunnable):
@@ -180,25 +190,36 @@ class VideoTableModel(QAbstractTableModel):
         """While a scan runs, skip scheduling new thumbnails (avoid I/O thrash)."""
         self._scanning = scanning
 
-    def refresh(
+    def show(
         self,
-        query: str = "",
-        category_id: int | None = None,
+        view: ViewKind,
+        *,
         root: str | None = None,
+        category_id: int | None = None,
+        favorite_list_id: int | None = None,
+        search_text: str = "",
     ) -> None:
-        if category_id is not None:
+        """Load the videos for a view; the view→query mapping lives here.
+
+        Precedence: search_text filters everything (all dirs), then a
+        category filter, then the view kind (favorites/recent/current/all).
+        """
+        if search_text:
+            videos = self._repo.search(search_text)
+        elif category_id is not None:
             videos = self._repo.videos_in_category(category_id)
-        elif query:
-            videos = self._repo.search(query)
-        else:
+        elif view == ViewKind.FAVORITES:
+            if favorite_list_id is not None:
+                videos = self._repo.get_favorites(favorite_list_id)
+            else:
+                videos = self._repo.all_videos()
+        elif view == ViewKind.RECENT:
+            videos = [v for _rec, v in self._repo.recent_plays(limit=200)]
+        elif view == ViewKind.CURRENT:
             videos = self._repo.videos_in_root(root)
+        else:
+            videos = self._repo.all_videos()
         self.set_videos(videos)
-
-    def refresh_favorites(self, list_id: int) -> None:
-        self.set_videos(self._repo.get_favorites(list_id))
-
-    def refresh_recent(self) -> None:
-        self.set_videos([v for _rec, v in self._repo.recent_plays(limit=200)])
 
     def all_videos(self) -> list[Video]:
         return self._videos
@@ -250,7 +271,7 @@ class VideoTableModel(QAbstractTableModel):
     # ---------- thumbnails ----------
 
     def _thumb_path(self, video_id: int) -> Path:
-        return self._thumbs_dir / f"{video_id}.jpg"
+        return Thumbnailer.path(self._thumbs_dir, video_id)
 
     def _load_thumb(self, v: Video) -> QIcon | None:
         thumb = self._thumb_path(v.id)

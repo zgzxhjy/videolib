@@ -31,12 +31,14 @@ from ui.dialogs.pick_scan_root import PickScanRootDialog
 from ui.player import PlayerWindow
 from ui.scan_worker import ScanWorker
 from ui.search_bar import SearchBar
-from ui.video_list import COL_PLAY, COL_THUMB, PlayTableView, VideoTableModel
+from ui.video_list import COL_PLAY, COL_THUMB, PlayTableView, VideoTableModel, ViewKind
 
-VIEW_CURRENT = "current"
-VIEW_ALL = "all"
-VIEW_FAVORITES = "favorites"
-VIEW_RECENT = "recent"
+# View constants kept for callers/tests; the mapping view→query lives in
+# VideoTableModel.show().
+VIEW_CURRENT = ViewKind.CURRENT
+VIEW_ALL = ViewKind.ALL
+VIEW_FAVORITES = ViewKind.FAVORITES
+VIEW_RECENT = ViewKind.RECENT
 
 
 def _under_root(path: str, root: str) -> bool:
@@ -87,13 +89,19 @@ class MainWindow(QMainWindow):
         self._count_label = QLabel("共 0 个视频")
         self.statusBar().addPermanentWidget(self._count_label)
         self.model.modelReset.connect(self._update_count_label)
-        self.model.refresh()
+        self.model.show(VIEW_ALL)
         self.table.selectionModel().selectionChanged.connect(
             lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
         )
         self._setup_shortcuts()
 
-        QTimer.singleShot(0, self._start_orphan_cleanup)
+        # Parented single-shot timer: a bare QTimer.singleShot(0, ...) would
+        # still fire after the window is destroyed and call a slot on a dead
+        # C++ object, which PyQt6 turns into a hard qFatal crash.
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setSingleShot(True)
+        self._cleanup_timer.timeout.connect(self._start_orphan_cleanup)
+        self._cleanup_timer.start(0)
 
         root = config.load_settings().get("watch_root")
         if root and os.path.isdir(root):
@@ -279,21 +287,18 @@ class MainWindow(QMainWindow):
                 vids.append(v)
         return vids
 
+    def _view_ctx(self) -> dict:
+        """Current navigation state, passed straight to VideoTableModel.show()."""
+        return {
+            "root": self._current_root,
+            "favorite_list_id": self._favorite_list_id,
+        }
+
     def _set_view(self, view: str) -> None:
         self._view = view
         self.search.clear()
         self.tree.clearSelection()
-        if view == VIEW_FAVORITES:
-            if self._favorite_list_id is not None:
-                self.model.refresh_favorites(self._favorite_list_id)
-            else:
-                self.model.refresh()
-        elif view == VIEW_RECENT:
-            self.model.refresh_recent()
-        elif view == VIEW_ALL:
-            self.model.refresh()
-        else:
-            self.model.refresh(root=self._current_root)
+        self.model.show(view, **self._view_ctx())
 
     def _refresh_all(self) -> None:
         self.tree.reload()
@@ -381,25 +386,17 @@ class MainWindow(QMainWindow):
     def _on_watch_changed(self) -> None:
         if self.search.text():
             return
-        if self._view == VIEW_CURRENT:
-            self.model.refresh(root=self._current_root)
-        elif self._view == VIEW_ALL:
-            self.model.refresh()
-        elif self._view == VIEW_FAVORITES:
-            if self._favorite_list_id is not None:
-                self.model.refresh_favorites(self._favorite_list_id)
-        elif self._view == VIEW_RECENT:
-            self.model.refresh_recent()
+        self.model.show(self._view, **self._view_ctx())
 
     def _on_search(self, text: str) -> None:
         self._view = VIEW_ALL
         self.tree.clearSelection()
-        self.model.refresh(text)
+        self.model.show(VIEW_ALL, search_text=text)
 
     def _on_category_selected(self, category_id: int | None) -> None:
         self._view = VIEW_CURRENT
         self.search.clear()
-        self.model.refresh(category_id=category_id, root=self._current_root)
+        self.model.show(VIEW_CURRENT, category_id=category_id, root=self._current_root)
         self.statusBar().showMessage(f"当前列表: {self.model.rowCount()} 个视频")
 
     def _play(self, video: Video | None) -> None:
@@ -419,7 +416,7 @@ class MainWindow(QMainWindow):
 
     def _on_player_closed(self, _video_id: int, _position: float) -> None:
         if self._view == VIEW_RECENT:
-            self.model.refresh_recent()
+            self.model.show(VIEW_RECENT)
 
     # ---------- context menu ----------
 
@@ -459,7 +456,7 @@ class MainWindow(QMainWindow):
                 self._repo.add_favorite(v.id, list_id)
             self._rebuild_favorites_menu()
             if self._view == VIEW_FAVORITES and self._favorite_list_id == list_id:
-                self.model.refresh_favorites(list_id)
+                self.model.show(VIEW_FAVORITES, favorite_list_id=list_id)
             self.statusBar().showMessage(f"已将 {len(videos)} 个视频加入收藏夹")
 
     def _remove_from_favorite(self, videos: list[Video], containing: set[int]) -> None:
@@ -468,7 +465,7 @@ class MainWindow(QMainWindow):
             for v in videos:
                 self._repo.remove_favorite(v.id, list_id)
             self._rebuild_favorites_menu()
-            self.model.refresh_favorites(list_id)
+            self.model.show(VIEW_FAVORITES, favorite_list_id=list_id)
             self.statusBar().showMessage(f"已将 {len(videos)} 个视频移出收藏夹")
             return
         dialog = PickFavoriteListDialog(
@@ -480,7 +477,7 @@ class MainWindow(QMainWindow):
                 self._repo.remove_favorite(v.id, list_id)
             self._rebuild_favorites_menu()
             if self._view == VIEW_FAVORITES and self._favorite_list_id == list_id:
-                self.model.refresh_favorites(list_id)
+                self.model.show(VIEW_FAVORITES, favorite_list_id=list_id)
             self.statusBar().showMessage(f"已将 {len(videos)} 个视频移出收藏夹")
 
     def _assign_category(self, videos: list[Video]) -> None:
