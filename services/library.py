@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import config
 from domain.repository import Repository
@@ -48,7 +49,14 @@ class Library:
             if should_cancel is not None and should_cancel():
                 canceled = True
                 break
-            videos.append(build_video(fp))
+            v = build_video(fp)
+            if Path(fp).suffix.lower() == ".bin" and v.codec is None:
+                # .bin is extension-ambiguous (firmware/ROM/data); only index
+                # files that actually carry a video stream.
+                if progress is not None:
+                    progress(i, total, fp)
+                continue
+            videos.append(v)
             if progress is not None:
                 progress(i, total, fp)
         changed = self._repo.upsert_videos(videos)

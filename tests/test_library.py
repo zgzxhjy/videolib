@@ -33,6 +33,12 @@ def _make_test_video(path: Path, seconds: int = 1) -> Path:
     return path
 
 
+def _make_test_bin_video(path: Path) -> Path:
+    """A real video container carrying the ambiguous .bin name (content
+    sniffing must look past the extension)."""
+    return _make_test_video(path.with_suffix(".mp4")).rename(path)
+
+
 @pytest.fixture()
 def repo(tmp_path):
     r = Repository(tmp_path / "db.sqlite")
@@ -169,3 +175,55 @@ def test_end_to_end_scan_through_library(tmp_path, repo):
     assert result.removed == 1
     assert not result.canceled
     assert repo.count() == 2
+
+
+def test_bin_with_real_video_content_is_indexed(tmp_path, repo):
+    """A .bin that really carries a video stream must be indexed."""
+    f = _make_test_bin_video(tmp_path / "movie.bin")
+    lib = Library(repo, tmp_path / "thumbs")
+
+    result = lib.apply_sync([str(f)], [])
+
+    assert result.probed == 1
+    v = repo.get_by_path(str(f))
+    assert v is not None
+    assert v.codec == "mpeg4"
+
+
+def test_bin_without_video_stream_is_skipped(tmp_path, repo):
+    """Garbage and audio-only .bin files must be sniffed out of the library."""
+    import av
+
+    garbage = tmp_path / "fake.bin"
+    garbage.write_bytes(b"this is definitely not a video")
+    audio = tmp_path / "audio.bin"
+    with av.open(str(audio), "w", format="mpeg") as container:
+        stream = container.add_stream("mp2", rate=44100)
+        frame = av.AudioFrame(format="s16", layout="stereo", samples=4410)
+        frame.sample_rate = 44100
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+
+    lib = Library(repo, tmp_path / "thumbs")
+    result = lib.apply_sync([str(garbage), str(audio)], [])
+
+    assert result.probed == 0
+    assert repo.count() == 0
+    assert repo.get_by_path(str(garbage)) is None
+    assert repo.get_by_path(str(audio)) is None
+
+
+def test_bin_sniff_does_not_affect_normal_extensions(tmp_path, repo):
+    """Corrupt .mp4 keeps pre-existing behavior (indexed with empty metadata)."""
+    f = tmp_path / "broken.mp4"
+    f.write_bytes(b"this is not a video")
+    lib = Library(repo, tmp_path / "thumbs")
+
+    result = lib.apply_sync([str(f)], [])
+
+    assert result.probed == 1
+    v = repo.get_by_path(str(f))
+    assert v is not None
+    assert v.codec is None

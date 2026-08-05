@@ -11,7 +11,7 @@ SETTINGS_PATH = APP_DIR / "settings.json"
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
-    ".m4v", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp", ".rmvb",
+    ".m4v", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp", ".rmvb", ".bin",
 }
 
 SEARCH_LIMIT = 500

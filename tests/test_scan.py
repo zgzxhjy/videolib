@@ -49,6 +49,14 @@ def test_scan_directory_ignores_non_video(tmp_path):
     assert scan_directory(str(tmp_path)) == []
 
 
+def test_scan_directory_finds_bin(tmp_path):
+    """Extension-only enumeration must see .bin; the content filter runs later."""
+    real = _make_test_video(tmp_path / "movie.mp4").rename(tmp_path / "movie.bin")
+    garbage = tmp_path / "fake.bin"
+    garbage.write_bytes(b"not a video")
+    assert set(scan_directory(str(tmp_path))) == {str(real), str(garbage)}
+
+
 def test_diff_scan(tmp_path):
     from services.scanner import diff_scan
 
