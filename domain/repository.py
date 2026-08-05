@@ -25,17 +25,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS videos_fts USING fts5(
     filename, filepath, content='videos', content_rowid='id'
 );
 
-CREATE TRIGGER IF NOT EXISTS videos_ai AFTER INSERT ON videos BEGIN
-    INSERT INTO videos_fts(rowid, filename, filepath) VALUES (new.id, new.filename, new.filepath);
-END;
-CREATE TRIGGER IF NOT EXISTS videos_ad AFTER DELETE ON videos BEGIN
-    INSERT INTO videos_fts(videos_fts, rowid, filename, filepath) VALUES ('delete', old.id, old.filename, old.filepath);
-END;
-CREATE TRIGGER IF NOT EXISTS videos_au AFTER UPDATE OF filename, filepath ON videos BEGIN
-    INSERT INTO videos_fts(videos_fts, rowid, filename, filepath) VALUES ('delete', old.id, old.filename, old.filepath);
-    INSERT INTO videos_fts(rowid, filename, filepath) VALUES (new.id, new.filename, new.filepath);
-END;
-
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -93,6 +82,9 @@ def _row_to_video(row: sqlite3.Row) -> Video:
     )
 
 
+CHUNK_SIZE = 500
+
+
 class Repository:
     """Single point of access to the SQLite database. Thread-safe."""
 
@@ -103,6 +95,9 @@ class Repository:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA cache_size=-20000")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
             self._migrate()
@@ -116,6 +111,17 @@ class Repository:
         cat_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(categories)")}
         if "root" not in cat_cols:
             self._conn.execute("ALTER TABLE categories ADD COLUMN root TEXT NOT NULL DEFAULT ''")
+        legacy_fts_triggers = {
+            r["name"]
+            for r in self._conn.execute(
+                """SELECT name FROM sqlite_master WHERE type = 'trigger'
+                   AND name IN ('videos_ai', 'videos_au', 'videos_ad')"""
+            )
+        }
+        if legacy_fts_triggers:
+            for t in legacy_fts_triggers:
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {t}")
+            self._sync_fts()
         if self._has_table("favorites"):
             n = self._conn.execute("SELECT COUNT(*) AS c FROM favorites").fetchone()["c"]
             empty_lists = (
@@ -138,6 +144,15 @@ class Repository:
         ).fetchone()
         return row is not None
 
+    def _sync_fts(self) -> None:
+        """Rebuild the FTS index from the videos table.
+
+        FTS is kept trigger-free so bulk scans do not pay one FTS write per
+        row; every write path rebuilds once instead (cheap up to ~100k rows).
+        Callers must already hold self._lock.
+        """
+        self._conn.execute("INSERT INTO videos_fts(videos_fts) VALUES ('rebuild')")
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -145,36 +160,48 @@ class Repository:
     # ---------- videos ----------
 
     def upsert_videos(self, videos: list[Video]) -> int:
-        """Insert or update by filepath. Returns number of rows changed."""
+        """Insert or update by filepath. Returns number of rows changed.
+
+        Rows are written in bounded chunks so the lock is never held for the
+        whole batch; the UI thread keeps responsive during large scans.
+        """
         if not videos:
             return 0
-        with self._lock:
-            cur = self._conn.executemany(
-                """INSERT INTO videos (filename, filepath, file_size, file_mtime, duration, resolution, codec)
-                   VALUES (:filename, :filepath, :file_size, :file_mtime, :duration, :resolution, :codec)
-                   ON CONFLICT(filepath) DO UPDATE SET
-                       filename=excluded.filename,
-                       file_size=excluded.file_size,
-                       file_mtime=excluded.file_mtime,
-                       duration=excluded.duration,
-                       resolution=excluded.resolution,
-                       codec=excluded.codec,
-                       scanned_at=CURRENT_TIMESTAMP""",
-                [
-                    {
-                        "filename": v.filename,
-                        "filepath": v.filepath,
-                        "file_size": v.file_size,
-                        "file_mtime": v.file_mtime,
-                        "duration": v.duration,
-                        "resolution": v.resolution,
-                        "codec": v.codec,
-                    }
-                    for v in videos
-                ],
-            )
-            self._conn.commit()
-            return cur.rowcount
+        total = 0
+        for start in range(0, len(videos), CHUNK_SIZE):
+            chunk = videos[start : start + CHUNK_SIZE]
+            with self._lock:
+                cur = self._conn.executemany(
+                    """INSERT INTO videos (filename, filepath, file_size, file_mtime, duration, resolution, codec)
+                       VALUES (:filename, :filepath, :file_size, :file_mtime, :duration, :resolution, :codec)
+                       ON CONFLICT(filepath) DO UPDATE SET
+                           filename=excluded.filename,
+                           file_size=excluded.file_size,
+                           file_mtime=excluded.file_mtime,
+                           duration=excluded.duration,
+                           resolution=excluded.resolution,
+                           codec=excluded.codec,
+                           scanned_at=CURRENT_TIMESTAMP""",
+                    [
+                        {
+                            "filename": v.filename,
+                            "filepath": v.filepath,
+                            "file_size": v.file_size,
+                            "file_mtime": v.file_mtime,
+                            "duration": v.duration,
+                            "resolution": v.resolution,
+                            "codec": v.codec,
+                        }
+                        for v in chunk
+                    ],
+                )
+                self._conn.commit()
+                total += cur.rowcount
+        if total:
+            with self._lock:
+                self._sync_fts()
+                self._conn.commit()
+        return total
 
     def all_filepaths(self) -> set[str]:
         with self._lock:
@@ -195,18 +222,28 @@ class Repository:
         """Delete videos by filepath, returning the deleted video ids."""
         if not paths:
             return []
-        with self._lock:
-            ids = [
-                r["id"]
-                for r in self._conn.execute(
-                    f"SELECT id FROM videos WHERE filepath IN ({','.join('?' * len(paths))})",
-                    paths,
-                )
-            ]
-            if ids:
-                self._conn.executemany("DELETE FROM videos WHERE filepath = ?", [(p,) for p in paths])
+        deleted: list[int] = []
+        for start in range(0, len(paths), CHUNK_SIZE):
+            chunk = paths[start : start + CHUNK_SIZE]
+            with self._lock:
+                ids = [
+                    r["id"]
+                    for r in self._conn.execute(
+                        f"SELECT id FROM videos WHERE filepath IN ({','.join('?' * len(chunk))})",
+                        chunk,
+                    )
+                ]
+                if ids:
+                    self._conn.executemany(
+                        "DELETE FROM videos WHERE filepath = ?", [(p,) for p in chunk]
+                    )
+                    self._conn.commit()
+                    deleted.extend(ids)
+        if deleted:
+            with self._lock:
+                self._sync_fts()
                 self._conn.commit()
-            return ids
+        return deleted
 
     def get_video(self, video_id: int) -> Video | None:
         with self._lock:
@@ -240,25 +277,42 @@ class Repository:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) AS c FROM videos").fetchone()["c"]
 
-    def all_videos(self, limit: int = 500) -> list[Video]:
+    def all_videos(self, limit: int | None = None) -> list[Video]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM videos ORDER BY filename LIMIT ?", (limit,)
-            ).fetchall()
+            if limit is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM videos ORDER BY filename"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM videos ORDER BY filename LIMIT ?", (limit,)
+                ).fetchall()
             return [_row_to_video(r) for r in rows]
 
-    def videos_in_root(self, root: str | None, limit: int = 500) -> list[Video]:
+    def all_video_ids(self) -> set[int]:
+        with self._lock:
+            return {r["id"] for r in self._conn.execute("SELECT id FROM videos")}
+
+    def videos_in_root(self, root: str | None, limit: int | None = None) -> list[Video]:
         """Videos under a scan root. root=None falls back to the whole library."""
         if root is None:
             return self.all_videos(limit)
         prefix = os.path.normpath(root) + os.sep
         with self._lock:
-            rows = self._conn.execute(
-                """SELECT * FROM videos
-                   WHERE substr(filepath, 1, length(?)) = ?
-                   ORDER BY filename LIMIT ?""",
-                (prefix, prefix, limit),
-            ).fetchall()
+            if limit is None:
+                rows = self._conn.execute(
+                    """SELECT * FROM videos
+                       WHERE substr(filepath, 1, length(?)) = ?
+                       ORDER BY filename""",
+                    (prefix, prefix),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT * FROM videos
+                       WHERE substr(filepath, 1, length(?)) = ?
+                       ORDER BY filename LIMIT ?""",
+                    (prefix, prefix, limit),
+                ).fetchall()
             return [_row_to_video(r) for r in rows]
 
     # ---------- scan roots ----------
@@ -306,6 +360,8 @@ class Repository:
                     "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
                     (prefix, prefix),
                 )
+                self._conn.commit()
+                self._sync_fts()
                 self._conn.commit()
             return ids
 

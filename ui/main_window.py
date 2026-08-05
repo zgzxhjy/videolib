@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, QThread, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -44,6 +44,19 @@ def _under_root(path: str, root: str) -> bool:
     return p == r or p.startswith(r + os.sep)
 
 
+class _OrphanCleanupThread(QThread):
+    """Deletes thumbnails whose video rows no longer exist, off the UI thread."""
+
+    def __init__(self, repo: Repository, parent=None):
+        super().__init__(parent)
+        self._repo = repo
+        self.removed = 0
+
+    def run(self) -> None:
+        valid = self._repo.all_video_ids()
+        self.removed = Thumbnailer.cleanup_orphans(config.THUMBS_DIR, valid)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
@@ -76,14 +89,29 @@ class MainWindow(QMainWindow):
         )
         self._setup_shortcuts()
 
-        Thumbnailer.cleanup_orphans(
-            config.THUMBS_DIR, {v.id for v in self._repo.all_videos(10**6)}
-        )
+        QTimer.singleShot(0, self._start_orphan_cleanup)
 
         root = config.load_settings().get("watch_root")
         if root and os.path.isdir(root):
             self._activate_root(root)
             self._start_watcher(root, resume=True)
+
+    def _start_orphan_cleanup(self) -> None:
+        self._cleanup_thread = _OrphanCleanupThread(self._repo, self)
+        self._cleanup_thread.finished.connect(self._on_orphan_cleanup_done)
+        self._cleanup_thread.start()
+
+    def _on_orphan_cleanup_done(self) -> None:
+        if self._cleanup_thread.removed:
+            self.statusBar().showMessage(
+                f"已清理 {self._cleanup_thread.removed} 个孤儿缩略图"
+            )
+
+    def _stop_watcher(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher.wait(3000)
+            self._watcher = None
 
     def _activate_root(self, root: str) -> None:
         """Set the current scan root, adopt legacy categories, switch the tree."""
@@ -92,9 +120,7 @@ class MainWindow(QMainWindow):
         self.tree.reload(root)
 
     def closeEvent(self, event) -> None:
-        if self._watcher is not None:
-            self._watcher.stop()
-            self._watcher.wait(3000)
+        self._stop_watcher()
         super().closeEvent(event)
 
     # ---------- UI construction ----------
@@ -190,10 +216,7 @@ class MainWindow(QMainWindow):
         self._rebuild_history_menu()
         for root in deleted:
             if root == config.load_settings().get("watch_root"):
-                if self._watcher is not None:
-                    self._watcher.stop()
-                    self._watcher.wait(3000)
-                    self._watcher = None
+                self._stop_watcher()
                 config.save_setting("watch_root", None)
         self._refresh_all()
         self.statusBar().showMessage(f"已删除 {len(deleted)} 个历史目录")
@@ -284,6 +307,8 @@ class MainWindow(QMainWindow):
         if not os.path.isdir(root):
             self.statusBar().showMessage(f"目录不存在或未连接: {root}")
             return
+        self._stop_watcher()
+        self.model.set_scanning(True)
         self._prev_root = self._current_root
         self._activate_root(root)
         self._set_view(VIEW_CURRENT)
@@ -317,6 +342,7 @@ class MainWindow(QMainWindow):
         self._scanner = None
         dialog.close()
         dialog.deleteLater()
+        self.model.set_scanning(False)
         if status == "empty":
             self._on_scan_empty(root)
             return
@@ -336,9 +362,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "扫描结果", f"该目录下没有视频文件:\n{root}")
 
     def _start_watcher(self, root: str, resume: bool = False) -> None:
-        if self._watcher is not None:
-            self._watcher.stop()
-            self._watcher.wait(3000)
+        self._stop_watcher()
         watcher = WatcherThread(root, self._repo)
         watcher.message.connect(self.statusBar().showMessage)
         watcher.changed.connect(self._on_watch_changed)

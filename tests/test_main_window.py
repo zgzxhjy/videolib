@@ -6,8 +6,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QHeaderView
 
 
 @pytest.fixture(scope="module")
@@ -59,19 +60,23 @@ def test_title_column_stretches(qapp, app_env):
         w.close()
 
 
-def test_long_title_row_grows(qapp, app_env):
-    """Rows must grow beyond the thumbnail height for very long wrapped titles."""
+def test_rows_have_fixed_height(qapp, app_env):
+    """At library scale rows must keep a fixed height (no per-row size hints),
+    and long filenames are still reachable via the full-path tooltip."""
     _mk_video(app_env, "超" * 300 + ".mp4", "D:/x/" + "超" * 300 + ".mp4")
     _mk_video(app_env, "短.mp4", "D:/x/短.mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
         qapp.processEvents()
-        videos = w.model.all_videos()  # ordered by filename: 短 < 超
-        long_row = next(i for i, v in enumerate(videos) if v.filename.startswith("超"))
-        short_row = next(i for i, v in enumerate(videos) if v.filename.startswith("短"))
-        assert w.table.rowHeight(long_row) > 96, "long title must wrap into a taller row"
-        assert w.table.rowHeight(short_row) <= 100, "short title keeps thumbnail row height"
+        assert w.table.verticalHeader().sectionResizeMode(0) == QHeaderView.ResizeMode.Fixed
+        for row in range(w.model.rowCount()):
+            assert w.table.rowHeight(row) == 96, "rows must be fixed at thumbnail height"
+            v = w.model.video_at(row)
+            tip = w.model.data(w.model.index(row, 1), Qt.ItemDataRole.ToolTipRole)
+            assert tip == v.filepath, "tooltip must expose the full path"
+            if len(v.filepath) > 100:
+                assert tip.startswith("D:/x/") and tip.endswith(".mp4")
     finally:
         w.close()
 
@@ -110,32 +115,3 @@ def test_play_button_delegate_sizehint(qapp):
     size = d.sizeHint(opt, M().index(0, 6))
     fm = QFontMetrics(qapp.font())
     assert size.width() >= fm.horizontalAdvance(d.BUTTON_TEXT) + 12
-
-
-def test_title_wrap_delegate_sizehint(qapp):
-    from PyQt6.QtCore import QAbstractTableModel, QRect
-    from PyQt6.QtWidgets import QStyleOptionViewItem
-
-    from ui.video_list import TitleWrapDelegate
-
-    class M(QAbstractTableModel):
-        def rowCount(self, parent=None):
-            return 2
-
-        def columnCount(self, parent=None):
-            return 2
-
-        def data(self, i, role=0):
-            if role == 0 and i.column() == 1:
-                return ("超" * 300) if i.row() == 0 else "短.mp4"
-            return None
-
-    model = M()
-    d = TitleWrapDelegate()
-    opt = QStyleOptionViewItem()
-    opt.font = qapp.font()
-    opt.rect = QRect(0, 0, 100, 96)
-    tall = d.sizeHint(opt, model.index(0, 1))
-    short = d.sizeHint(opt, model.index(1, 1))
-    assert tall.height() > 96, "CJK titles wrap at every char, must be tall"
-    assert short.height() <= 96

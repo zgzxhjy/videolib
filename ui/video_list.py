@@ -4,11 +4,9 @@ from pathlib import Path
 from PyQt6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
-    QRect,
     QRunnable,
     QSize,
     QThreadPool,
-    QTimer,
     Qt,
     pyqtSignal,
 )
@@ -27,7 +25,6 @@ from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
 
 COL_THUMB = 0
 COL_PLAY = 6
-COL_TITLE = 1
 
 
 class ThumbRunnable(QRunnable):
@@ -84,34 +81,20 @@ class PlayButtonDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-class TitleWrapDelegate(QStyledItemDelegate):
-    """Wraps long titles. sizeHint uses the real column width so tall rows grow."""
-
-    def sizeHint(self, option, index):
-        base = super().sizeHint(option, index)
-        height = max(base.height(), THUMB_HEIGHT)
-        text = index.data(Qt.ItemDataRole.DisplayRole)
-        width = option.rect.width() - 8
-        if text and width > 0:
-            fm = QFontMetrics(option.font)
-            wrapped = fm.boundingRect(
-                QRect(0, 0, width, 10**6),
-                int(Qt.TextFlag.TextWordWrap),
-                text,
-            ).height()
-            height = max(height, wrapped)
-        return QSize(base.width(), height)
-
-
 class PlayTableView(QTableView):
-    """Table with hover/press-aware play column."""
+    """Table with hover/press-aware play column.
+
+    Row heights are fixed (THUMB_HEIGHT): with tens of thousands of rows,
+    ResizeToContents would recompute size hints for every row on each reset.
+    Long filenames wrap within the fixed cell and the full path is available
+    as a tooltip.
+    """
 
     play_clicked = pyqtSignal(int)  # row
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._delegate = PlayButtonDelegate(self)
-        self._title_delegate = TitleWrapDelegate(self)
         self._hover_row: int | None = None
         self._press_row: int | None = None
         self.setMouseTracking(True)
@@ -119,16 +102,8 @@ class PlayTableView(QTableView):
     def setModel(self, model) -> None:
         super().setModel(model)
         self.setItemDelegateForColumn(COL_PLAY, self._delegate)
-        self.setItemDelegateForColumn(COL_TITLE, self._title_delegate)
-        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        model.modelReset.connect(self._refresh_row_heights)
-        self.horizontalHeader().sectionResized.connect(self._schedule_row_heights)
-
-    def _refresh_row_heights(self) -> None:
-        self.verticalHeader().resizeSections(QHeaderView.ResizeMode.ResizeToContents)
-
-    def _schedule_row_heights(self) -> None:
-        QTimer.singleShot(0, self._refresh_row_heights)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.verticalHeader().setDefaultSectionSize(THUMB_HEIGHT)
 
     def _play_row_at(self, pos) -> int:
         idx = self.indexAt(pos)
@@ -184,6 +159,8 @@ class VideoTableModel(QAbstractTableModel):
         self._repo = repo
         self._thumbs_dir = thumbs_dir
         self._videos: list[Video] = []
+        self._id_to_row: dict[int, int] = {}
+        self._scanning = False
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(4)
         self._requested: set[int] = set()
@@ -195,8 +172,13 @@ class VideoTableModel(QAbstractTableModel):
     def set_videos(self, videos: list[Video]) -> None:
         self.beginResetModel()
         self._videos = videos
+        self._id_to_row = {v.id: i for i, v in enumerate(videos)}
         self._requested.clear()
         self.endResetModel()
+
+    def set_scanning(self, scanning: bool) -> None:
+        """While a scan runs, skip scheduling new thumbnails (avoid I/O thrash)."""
+        self._scanning = scanning
 
     def refresh(
         self,
@@ -259,6 +241,8 @@ class VideoTableModel(QAbstractTableModel):
                 return _fmt_size(v.file_size)
         if role == Qt.ItemDataRole.DecorationRole and col == COL_THUMB:
             return self._load_thumb(v)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return v.filepath
         if role == Qt.ItemDataRole.UserRole:
             return v
         return None
@@ -278,6 +262,8 @@ class VideoTableModel(QAbstractTableModel):
         return QIcon()
 
     def _schedule(self, v: Video) -> None:
+        if self._scanning:
+            return
         with self._lock:
             if v.id in self._requested:
                 return
@@ -288,11 +274,11 @@ class VideoTableModel(QAbstractTableModel):
         self._pool.start(runnable)
 
     def _on_thumb_ready(self, video_id: int) -> None:
-        for i, v in enumerate(self._videos):
-            if v.id == video_id:
-                idx = self.index(i, COL_THUMB)
-                self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
-                return
+        row = self._id_to_row.get(video_id)
+        if row is None:
+            return
+        idx = self.index(row, COL_THUMB)
+        self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
 
 
 def _fmt_duration(seconds: float | None) -> str:
