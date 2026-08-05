@@ -93,6 +93,7 @@ class Repository:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._videos_dirty = False
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -153,6 +154,38 @@ class Repository:
         """
         self._conn.execute("INSERT INTO videos_fts(videos_fts) VALUES ('rebuild')")
 
+    def _write(self, fn):
+        """Run fn under the lock and commit."""
+        with self._lock:
+            result = fn()
+            self._conn.commit()
+            return result
+
+    def _write_videos(self, fn):
+        """Like _write, but marks the FTS index dirty for _finish_videos_write.
+
+        Rebuild happens once per batch in _finish_videos_write, never per
+        chunk, so bulk writes do not pay N FTS rebuilds.
+        """
+        with self._lock:
+            result = fn()
+            self._conn.commit()
+            self._videos_dirty = True
+            return result
+
+    def _finish_videos_write(self) -> None:
+        """Rebuild the FTS index once, after a batch of videos-table writes.
+
+        The invariant lives here: any write path that changes videos rows
+        must end with this call so search never goes stale.
+        """
+        if not self._videos_dirty:
+            return
+        with self._lock:
+            self._sync_fts()
+            self._conn.commit()
+            self._videos_dirty = False
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -170,8 +203,8 @@ class Repository:
         total = 0
         for start in range(0, len(videos), CHUNK_SIZE):
             chunk = videos[start : start + CHUNK_SIZE]
-            with self._lock:
-                cur = self._conn.executemany(
+            cur = self._write_videos(
+                lambda: self._conn.executemany(
                     """INSERT INTO videos (filename, filepath, file_size, file_mtime, duration, resolution, codec)
                        VALUES (:filename, :filepath, :file_size, :file_mtime, :duration, :resolution, :codec)
                        ON CONFLICT(filepath) DO UPDATE SET
@@ -195,12 +228,9 @@ class Repository:
                         for v in chunk
                     ],
                 )
-                self._conn.commit()
-                total += cur.rowcount
-        if total:
-            with self._lock:
-                self._sync_fts()
-                self._conn.commit()
+            )
+            total += cur.rowcount
+        self._finish_videos_write()
         return total
 
     def all_filepaths(self) -> set[str]:
@@ -225,25 +255,28 @@ class Repository:
         deleted: list[int] = []
         for start in range(0, len(paths), CHUNK_SIZE):
             chunk = paths[start : start + CHUNK_SIZE]
-            with self._lock:
-                ids = [
-                    r["id"]
-                    for r in self._conn.execute(
-                        f"SELECT id FROM videos WHERE filepath IN ({','.join('?' * len(chunk))})",
-                        chunk,
-                    )
-                ]
-                if ids:
-                    self._conn.executemany(
-                        "DELETE FROM videos WHERE filepath = ?", [(p,) for p in chunk]
-                    )
-                    self._conn.commit()
-                    deleted.extend(ids)
-        if deleted:
-            with self._lock:
-                self._sync_fts()
-                self._conn.commit()
+            deleted.extend(
+                self._write_videos(
+                    lambda: self._delete_chunk(chunk)
+                )
+            )
+        self._finish_videos_write()
         return deleted
+
+    def _delete_chunk(self, chunk: list[str]) -> list[int]:
+        """Delete one chunk of filepaths, returning the deleted video ids."""
+        ids = [
+            r["id"]
+            for r in self._conn.execute(
+                f"SELECT id FROM videos WHERE filepath IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+        ]
+        if ids:
+            self._conn.executemany(
+                "DELETE FROM videos WHERE filepath = ?", [(p,) for p in chunk]
+            )
+        return ids
 
     def get_video(self, video_id: int) -> Video | None:
         with self._lock:
@@ -347,23 +380,26 @@ class Repository:
         thumbnails for the returned ids (files would be reused by new rows).
         """
         prefix = os.path.normpath(root) + os.sep
-        with self._lock:
-            ids = [
-                r["id"]
-                for r in self._conn.execute(
-                    "SELECT id FROM videos WHERE substr(filepath, 1, length(?)) = ?",
-                    (prefix, prefix),
-                )
-            ]
-            if ids:
-                self._conn.execute(
-                    "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
-                    (prefix, prefix),
-                )
-                self._conn.commit()
-                self._sync_fts()
-                self._conn.commit()
-            return ids
+        ids = self._write_videos(
+            lambda: self._remove_under(prefix)
+        )
+        self._finish_videos_write()
+        return ids
+
+    def _remove_under(self, prefix: str) -> list[int]:
+        ids = [
+            r["id"]
+            for r in self._conn.execute(
+                "SELECT id FROM videos WHERE substr(filepath, 1, length(?)) = ?",
+                (prefix, prefix),
+            )
+        ]
+        if ids:
+            self._conn.execute(
+                "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
+                (prefix, prefix),
+            )
+        return ids
 
     # ---------- search ----------
 

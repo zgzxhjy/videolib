@@ -34,6 +34,25 @@ def test_upsert_and_fetch(repo):
     assert repo.count() == 1
 
 
+def test_fts_stays_in_sync_across_write_paths(repo):
+    """Every videos-table write path must leave the FTS index searchable
+    (invariant owned by _finish_videos_write; a forgotten rebuild makes
+    search silently stale)."""
+    repo.upsert_videos([_mk("alpha.mp4", r"D:\v\clip1.mp4")])
+    assert repo.search("alpha"), "upsert must rebuild FTS"
+
+    repo.upsert_videos([_mk("beta.mp4", r"D:\v\clip1.mp4")])  # same row, renamed
+    assert repo.search("beta"), "upsert-update must rebuild FTS"
+    assert repo.search("alpha") == [], "a stale FTS would still match the old token"
+
+    repo.remove_by_filepaths([r"D:\v\clip1.mp4"])
+    assert repo.search("beta") == [], "remove_by_filepaths must rebuild FTS"
+
+    repo.upsert_videos([_mk("gamma.mp4", r"D:\root\clip2.mp4")])
+    repo.remove_videos_under(r"D:\root")
+    assert repo.search("gamma") == [], "remove_videos_under must rebuild FTS"
+
+
 def test_upsert_updates_existing(repo):
     repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4")])
     repo.upsert_videos([_mk("a-renamed.mp4", r"D:\v\a.mp4", file_size=2048)])
