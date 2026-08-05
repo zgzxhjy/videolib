@@ -93,7 +93,7 @@ def test_build_video(video_dir):
 
 
 def test_thumbnail_generation(video_dir, tmp_path):
-    from services.thumbnailer import THUMB_HEIGHT, THUMB_WIDTH
+    from services.thumbnailer import THUMB_PIXEL_HEIGHT, THUMB_PIXEL_WIDTH
 
     thumbs = Thumbnailer(tmp_path / "thumbs")
     ok = thumbs.ensure(str(video_dir), video_id=1)
@@ -105,8 +105,44 @@ def test_thumbnail_generation(video_dir, tmp_path):
 
     with av.open(str(thumbs.path_for(1))) as c:
         stream = c.streams.video[0]
-        assert stream.width == THUMB_WIDTH
-        assert stream.height == THUMB_HEIGHT
+        assert stream.width == THUMB_PIXEL_WIDTH
+        assert stream.height == THUMB_PIXEL_HEIGHT
+
+
+def test_thumbnail_legacy_1x_regenerates(video_dir, tmp_path):
+    """Thumbnails made before the HiDPI change (170x96) must be regenerated
+    at 2x on the next scheduled task."""
+    import av
+
+    from services.thumbnailer import THUMB_HEIGHT, THUMB_PIXEL_WIDTH, THUMB_WIDTH
+
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    assert thumbs.ensure(str(video_dir), video_id=7) is True
+    assert thumbs.path_for(7).stat().st_size > 0
+
+    # build a genuine 1x thumbnail (as old installs produced)
+    with av.open(str(thumbs.path_for(7))) as c:
+        frame = next(c.decode(video=0))
+    legacy = frame.reformat(
+        width=THUMB_WIDTH, height=THUMB_HEIGHT, format="yuv420p"
+    )
+    legacy_path = tmp_path / "legacy.jpg"
+    with av.open(str(legacy_path), "w") as out:
+        jpeg = out.add_stream("mjpeg")
+        jpeg.width = legacy.width
+        jpeg.height = legacy.height
+        jpeg.pix_fmt = "yuvj420p"
+        for packet in jpeg.encode(legacy):
+            out.mux(packet)
+        for packet in jpeg.encode():
+            out.mux(packet)
+    legacy_path.replace(thumbs.path_for(7))
+    with av.open(str(thumbs.path_for(7))) as c:
+        assert c.streams.video[0].width == THUMB_WIDTH, "precondition: 1x in place"
+
+    assert thumbs.ensure(str(video_dir), video_id=7) is True
+    with av.open(str(thumbs.path_for(7))) as c:
+        assert c.streams.video[0].width == THUMB_PIXEL_WIDTH, "1x must be regenerated"
 
 
 def test_thumbnail_crop_fills_cell(tmp_path):

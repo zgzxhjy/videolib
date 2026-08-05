@@ -339,6 +339,35 @@ def test_videos_in_root(repo):
     assert len(repo.videos_in_root(None)) == 3
 
 
+def test_prefix_queries_exclude_sibling_dirs(repo):
+    r"""Range predicates must match exactly the root's subtree: D:\v must not
+    leak D:\vx\..., and D:\x\sub must not leak D:\x\sub2\..."""
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\v\a.mp4"),
+        _mk("sibling.mp4", r"D:\vx\sibling.mp4"),
+        _mk("sub.mp4", r"D:\x\sub\sub.mp4"),
+        _mk("sub2.mp4", r"D:\x\sub2\sub2.mp4"),
+    ])
+    assert {v.filename for v in repo.videos_in_root(r"D:\v")} == {"a.mp4"}
+    assert {v.filename for v in repo.videos_in_root(r"D:\x\sub")} == {"sub.mp4"}
+    assert set(repo.existing_under(r"D:\v")) == {r"D:\v\a.mp4"}
+    assert repo.count_in_root(r"D:\v") == 1
+    removed = repo.remove_videos_under(r"D:\v")
+    assert len(removed) == 1
+    assert repo.get_by_path(r"D:\vx\sibling.mp4") is not None
+
+
+def test_prefix_bounds_helper():
+    from domain.repository import _prefix_bounds
+
+    lo, hi = _prefix_bounds(r"D:\v" + "\\")
+    assert lo == r"D:\v" + "\\"
+    assert lo < r"D:\v\a.mp4" < hi
+    assert not (lo <= r"D:\vx\sibling.mp4" < hi), "sibling must fall outside"
+    lo, hi = _prefix_bounds("D:\\")
+    assert lo < "D:\\a.mp4" < hi
+
+
 def test_scan_roots_register_and_list(repo):
     repo.register_scan(r"D:\a")
     repo.register_scan(r"D:\b")

@@ -10,6 +10,10 @@ THUMB_WIDTH = 170
 THUMB_HEIGHT = 96
 THUMB_ASPECT = THUMB_WIDTH / THUMB_HEIGHT  # ~16:9, crops source to fill
 
+THUMB_SCALE = 2  # generate at 2x so HiDPI displays stay crisp
+THUMB_PIXEL_WIDTH = THUMB_WIDTH * THUMB_SCALE
+THUMB_PIXEL_HEIGHT = THUMB_HEIGHT * THUMB_SCALE
+
 
 def _log_failure(filepath: str, exc: Exception) -> None:
     try:
@@ -69,8 +73,8 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
                 container.seek(seek_pts, backward=True, any_frame=False, stream=stream)
             frame = next(container.decode(video=0))
             scaled = _center_crop(frame).reformat(
-                width=THUMB_WIDTH,
-                height=THUMB_HEIGHT,
+                width=THUMB_PIXEL_WIDTH,
+                height=THUMB_PIXEL_HEIGHT,
                 format="yuv420p",
             )
             with av.open(str(thumb_path), "w") as out:
@@ -86,6 +90,22 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
     except Exception as exc:
         _log_failure(filepath, exc)
         return False
+
+
+def _is_stale_thumb(thumb_path: Path) -> bool:
+    """True when an existing thumbnail was generated at an older resolution
+    (1x). Reading just the JPEG header is cheap enough to run once per
+    scheduled generation task, and lets existing libraries upgrade lazily."""
+    try:
+        with av.open(str(thumb_path)) as container:
+            stream = next(
+                (s for s in container.streams if s.type == "video"), None
+            )
+            if stream is None:
+                return True
+            return stream.width < THUMB_PIXEL_WIDTH or stream.height < THUMB_PIXEL_HEIGHT
+    except Exception:
+        return True
 
 
 class Thumbnailer:
@@ -109,10 +129,10 @@ class Thumbnailer:
         return self.path_for(video_id).exists()
 
     def ensure(self, filepath: str, video_id: int, repo=None) -> bool:
-        """Generate thumb if missing (or zero-byte/corrupt). When repo is
-        given, persist thumb_path."""
+        """Generate thumb if missing (or zero-byte/old-resolution). When repo
+        is given, persist thumb_path."""
         thumb = self.path_for(video_id)
-        if thumb.exists() and thumb.stat().st_size > 0:
+        if thumb.exists() and thumb.stat().st_size > 0 and not _is_stale_thumb(thumb):
             return True
         with self._lock:
             if filepath in self._pending:

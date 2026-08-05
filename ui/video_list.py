@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 from domain.models import Video
 from domain.repository import Repository
-from services.thumbnailer import THUMB_HEIGHT, Thumbnailer
+from services.thumbnailer import THUMB_HEIGHT, THUMB_SCALE, Thumbnailer
 
 COL_THUMB = 0
 COL_PLAY = 6
@@ -356,6 +356,7 @@ class VideoTableModel(QAbstractTableModel):
         thumb = self._thumb_path(v.id)
         if thumb.exists():
             pixmap = QPixmap(str(thumb))
+            pixmap.setDevicePixelRatio(THUMB_SCALE)
             if not pixmap.isNull():
                 self._cache_pixmap(v.id, pixmap)
                 return QIcon(pixmap)
@@ -395,6 +396,7 @@ class VideoTableModel(QAbstractTableModel):
         thumb = self._thumb_path(video_id)
         if thumb.exists():
             pixmap = QPixmap(str(thumb))
+            pixmap.setDevicePixelRatio(THUMB_SCALE)
             if not pixmap.isNull():
                 self._cache_pixmap(video_id, pixmap)
         row = self._id_to_row.get(video_id)

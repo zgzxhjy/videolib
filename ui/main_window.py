@@ -613,6 +613,7 @@ class MainWindow(QMainWindow):
         menu.addAction("从分类移除...", lambda: self._unassign_category(videos))
         menu.addSeparator()
         menu.addAction("打开所在文件夹", lambda: self._reveal(videos[0]))
+        menu.addAction("ℹ 视频信息", lambda: self._show_video_info(videos[0]))
         menu.addAction("重新生成缩略图", lambda: self._regenerate_thumbs(videos))
         menu.addAction("✔ 标记为已看完", lambda: self._mark_finished(videos))
         menu.addAction("复制路径", lambda: self._copy_paths(videos))
@@ -626,6 +627,12 @@ class MainWindow(QMainWindow):
         ids = [v.id for v in videos]
         self.model.regenerate_thumbs(ids)
         self.statusBar().showMessage(f"已重新生成 {len(ids)} 个缩略图")
+
+    def _show_video_info(self, video: Video) -> None:
+        from ui.dialogs.video_info import VideoInfoDialog
+
+        dialog = VideoInfoDialog(video, self._repo, self)
+        dialog.exec()
 
     def _find_duplicates(self) -> None:
         from ui.video_list import _fmt_size

@@ -26,6 +26,7 @@ def diff_scan(
     and previously-known paths under the same root that no longer exist.
     """
     existing_paths = set(existing)
+    files_set = set(files)
     need_probe = []
     for fp in files:
         cur = existing.get(fp)
@@ -40,5 +41,5 @@ def diff_scan(
         mtime_ok = cur[1] is not None and abs(cur[1] - st.st_mtime) < 1.0
         if not (size_ok and mtime_ok):
             need_probe.append(fp)
-    stale = [p for p in existing_paths if p not in set(files)]
+    stale = [p for p in existing_paths if p not in files_set]
     return need_probe, stale

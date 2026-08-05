@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS video_categories (
     PRIMARY KEY (video_id, category_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_video_categories_category
+    ON video_categories(category_id, video_id);
+
 CREATE TABLE IF NOT EXISTS play_history (
     id INTEGER PRIMARY KEY,
     video_id INTEGER UNIQUE REFERENCES videos(id) ON DELETE CASCADE,
@@ -85,6 +88,20 @@ def _row_to_video(row: sqlite3.Row) -> Video:
 CHUNK_SIZE = 500
 
 
+def _prefix_bounds(prefix: str) -> tuple[str, str]:
+    """BINARY range that covers exactly the paths starting with `prefix`.
+
+    `substr(filepath, 1, length(?)) = ?` scans the whole table; a range
+    predicate on the unique `filepath` column can use its index instead.
+    The upper bound is the last character bumped by one, so `D:\\v\\` yields
+    [`D:\\v\\`, `D:\\v]`) — every child starts with the separator (0x5C < 0x5D)
+    and sibling names like `D:\\vx\\...` are excluded.
+    """
+    lo = prefix
+    hi = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+    return lo, hi
+
+
 class Repository:
     """Single point of access to the SQLite database. Thread-safe."""
 
@@ -123,6 +140,10 @@ class Repository:
             for t in legacy_fts_triggers:
                 self._conn.execute(f"DROP TRIGGER IF EXISTS {t}")
             self._sync_fts()
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_video_categories_category
+               ON video_categories(category_id, video_id)"""
+        )
         if self._has_table("favorites"):
             n = self._conn.execute("SELECT COUNT(*) AS c FROM favorites").fetchone()["c"]
             empty_lists = (
@@ -272,11 +293,12 @@ class Repository:
     def existing_under(self, root: str) -> dict[str, tuple[int, float | None]]:
         """Known videos under root: filepath -> (file_size, file_mtime)."""
         prefix = os.path.normpath(root) + os.sep
+        lo, hi = _prefix_bounds(prefix)
         with self._lock:
             rows = self._conn.execute(
                 """SELECT filepath, file_size, file_mtime FROM videos
-                   WHERE substr(filepath, 1, length(?)) = ?""",
-                (prefix, prefix),
+                   WHERE filepath >= ? AND filepath < ?""",
+                (lo, hi),
             ).fetchall()
             return {r["filepath"]: (r["file_size"], r["file_mtime"]) for r in rows}
 
@@ -392,20 +414,21 @@ class Repository:
         if root is None:
             return self.all_videos(limit)
         prefix = os.path.normpath(root) + os.sep
+        lo, hi = _prefix_bounds(prefix)
         with self._lock:
             if limit is None:
                 rows = self._conn.execute(
                     """SELECT * FROM videos
-                       WHERE substr(filepath, 1, length(?)) = ?
+                       WHERE filepath >= ? AND filepath < ?
                        ORDER BY filename""",
-                    (prefix, prefix),
+                    (lo, hi),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
                     """SELECT * FROM videos
-                       WHERE substr(filepath, 1, length(?)) = ?
+                       WHERE filepath >= ? AND filepath < ?
                        ORDER BY filename LIMIT ?""",
-                    (prefix, prefix, limit),
+                    (lo, hi, limit),
                 ).fetchall()
             return [_row_to_video(r) for r in rows]
 
@@ -497,17 +520,18 @@ class Repository:
             self._conn.execute("DELETE FROM categories WHERE id = ?", (cid,))
 
     def _remove_under(self, prefix: str) -> list[int]:
+        lo, hi = _prefix_bounds(prefix)
         ids = [
             r["id"]
             for r in self._conn.execute(
-                "SELECT id FROM videos WHERE substr(filepath, 1, length(?)) = ?",
-                (prefix, prefix),
+                "SELECT id FROM videos WHERE filepath >= ? AND filepath < ?",
+                (lo, hi),
             )
         ]
         if ids:
             self._conn.execute(
-                "DELETE FROM videos WHERE substr(filepath, 1, length(?)) = ?",
-                (prefix, prefix),
+                "DELETE FROM videos WHERE filepath >= ? AND filepath < ?",
+                (lo, hi),
             )
         return ids
 
@@ -818,24 +842,38 @@ class Repository:
                    LEFT JOIN video_categories vc ON vc.category_id = c.id
                    GROUP BY c.id ORDER BY c.name"""
             ).fetchall()
-        roots = []
-        for root in self.get_scan_roots():
-            roots.append((root, self.count_in_root(root)))
+            roots = self.get_scan_roots()
+            per_root = {}
+            if roots:
+                per = " UNION ALL ".join(
+                    "SELECT ? AS root, COUNT(*) AS c FROM videos "
+                    "WHERE filepath >= ? AND filepath < ?"
+                    for _ in roots
+                )
+                args: list[str] = []
+                for r in roots:
+                    lo, hi = _prefix_bounds(os.path.normpath(r) + os.sep)
+                    args += [r, lo, hi]
+                per_root = {
+                    row["root"]: row["c"]
+                    for row in self._conn.execute(per, args).fetchall()
+                }
         return {
             "count": totals["count"],
             "duration": totals["duration"],
             "size": totals["size"],
-            "roots": roots,
+            "roots": [(r, per_root.get(r, 0)) for r in roots],
             "categories": [(r["name"], r["count"]) for r in cats],
         }
 
     def count_in_root(self, root: str) -> int:
         prefix = os.path.normpath(root) + os.sep
+        lo, hi = _prefix_bounds(prefix)
         with self._lock:
             row = self._conn.execute(
                 """SELECT COUNT(*) AS c FROM videos
-                   WHERE substr(filepath, 1, length(?)) = ?""",
-                (prefix, prefix),
+                   WHERE filepath >= ? AND filepath < ?""",
+                (lo, hi),
             ).fetchone()
             return row["c"]
 
