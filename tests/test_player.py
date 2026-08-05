@@ -37,9 +37,13 @@ class FakePlayer(QObject):
         self._pos = 0
         self.positions: list[int] = []
         self.source: QUrl | None = None
+        self.rate = 1.0
 
     def setSource(self, url):
         self.source = url
+
+    def setPlaybackRate(self, rate):
+        self.rate = rate
 
     def setPosition(self, ms):
         self.positions.append(ms)
@@ -76,9 +80,12 @@ class FakeAudioOutput:
 
 
 @pytest.fixture()
-def fake_player(monkeypatch):
+def fake_player(monkeypatch, tmp_path):
+    import config
+
     import ui.player as player_mod
 
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(player_mod, "QMediaPlayer", FakePlayer)
     monkeypatch.setattr(player_mod, "QAudioOutput", FakeAudioOutput)
 
@@ -172,6 +179,67 @@ def test_esc_closes_and_records_position(qapp, player_env, fake_player):
     QTest.keyClick(w, Qt.Key.Key_Escape)
     assert not w.isVisible(), "Esc must close the player"
     assert player_env.last_position(a.id) == 60.0
+
+
+def test_rate_button_cycles_and_r_key(qapp, player_env, fake_player):
+    _ensure_video(player_env)
+    w = _window(player_env)
+    try:
+        assert w.btn_rate.text() == "倍速 1x"
+        w.btn_rate.click()
+        assert w.player.rate == 1.25 and w.btn_rate.text() == "倍速 1.25x"
+        w.btn_rate.click()
+        w.btn_rate.click()
+        assert w.player.rate == 2.0 and w.btn_rate.text() == "倍速 2x"
+        w.btn_rate.click()
+        assert w.player.rate == 0.5, "rate must wrap around"
+        w.btn_rate.click()
+        assert w.player.rate == 1.0, "rate must wrap back to 1x"
+        QTest.keyClick(w, Qt.Key.Key_R)
+        assert w.player.rate == 1.25, "R must cycle the rate too"
+    finally:
+        w.close()
+
+
+def test_fullscreen_f_double_click_and_esc(qapp, player_env, fake_player):
+    _ensure_video(player_env)
+    w = _window(player_env)
+    w.show()
+    try:
+        QTest.keyClick(w, Qt.Key.Key_F)
+        assert w.isFullScreen(), "F must enter fullscreen"
+        QTest.keyClick(w, Qt.Key.Key_Escape)
+        assert not w.isFullScreen(), "Esc must exit fullscreen first"
+        assert w.isVisible(), "the window must stay open after unfullscreening"
+
+        QTest.mouseDClick(w.video_widget, Qt.MouseButton.LeftButton)
+        assert w.isFullScreen(), "double-click must enter fullscreen"
+        QTest.mouseDClick(w.video_widget, Qt.MouseButton.LeftButton)
+        assert not w.isFullScreen(), "double-click must exit fullscreen"
+
+        QTest.keyClick(w, Qt.Key.Key_F)
+        QTest.keyClick(w, Qt.Key.Key_Escape)
+        QTest.keyClick(w, Qt.Key.Key_Escape)
+        assert not w.isVisible(), "Esc while not fullscreen must close"
+    finally:
+        w.close()
+
+
+def test_volume_memory_across_runs(qapp, player_env, fake_player):
+    import config
+
+    _ensure_video(player_env)
+
+    w1 = _window(player_env)
+    w1.vol.setValue(55)
+    w1.close()
+
+    w2 = _window(player_env)
+    try:
+        assert w2.vol.value() == 55, "volume must be restored from settings"
+        assert config.load_settings().get("volume") == 55
+    finally:
+        w2.close()
 
 
 def _ensure_videos(player_env, *names):

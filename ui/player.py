@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QUrl, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QUrl, Qt, pyqtSignal
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import config
 from domain.models import Video
 from domain.repository import Repository
 
@@ -27,6 +28,7 @@ class PlayerWindow(QWidget):
 
     SEEK_STEP_S = 5
     VOL_STEP = 5
+    RATES = (0.5, 1.0, 1.25, 1.5, 2.0)
 
     def __init__(self, video: Video, repo: Repository, queue: list[Video] | None = None, parent=None):
         super().__init__(parent)
@@ -43,12 +45,15 @@ class PlayerWindow(QWidget):
         self._closing = False
         self._user_seeking = False
         self._resume_pos = 0.0
+        self._rate_idx = self.RATES.index(1.0)
+        self._rate = 1.0
 
         self.setWindowTitle(self._video.filename)
         self.resize(960, 560)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.video_widget = QVideoWidget()
+        self.video_widget.installEventFilter(self)
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setVideoOutput(self.video_widget)
@@ -62,6 +67,8 @@ class PlayerWindow(QWidget):
         self.btn_next.clicked.connect(self._next)
         self.btn_stop = QPushButton("停止")
         self.btn_stop.clicked.connect(self._stop)
+        self.btn_rate = QPushButton(self._rate_label())
+        self.btn_rate.clicked.connect(self._cycle_rate)
         self.time_label = QLabel("00:00 / 00:00")
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -71,7 +78,7 @@ class PlayerWindow(QWidget):
 
         self.vol = QSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 100)
-        self.vol.setValue(80)
+        self.vol.setValue(int(config.load_settings().get("volume", 80)))
         self.vol.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
 
         controls = QHBoxLayout()
@@ -79,6 +86,7 @@ class PlayerWindow(QWidget):
         controls.addWidget(self.btn_next)
         controls.addWidget(self.btn_play)
         controls.addWidget(self.btn_stop)
+        controls.addWidget(self.btn_rate)
         controls.addWidget(self.time_label)
         controls.addWidget(self.slider, 1)
         controls.addWidget(QLabel("音量"))
@@ -133,6 +141,27 @@ class PlayerWindow(QWidget):
         else:
             self.player.play()
             self.btn_play.setText("暂停")
+
+    def _cycle_rate(self) -> None:
+        self._rate_idx = (self._rate_idx + 1) % len(self.RATES)
+        self._rate = self.RATES[self._rate_idx]
+        self.player.setPlaybackRate(self._rate)
+        self.btn_rate.setText(self._rate_label())
+
+    def _rate_label(self) -> str:
+        return f"倍速 {self._rate:g}x"
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.video_widget and event.type() == QEvent.Type.MouseButtonDblClick:
+            self._toggle_fullscreen()
+            return True
+        return super().eventFilter(obj, event)
 
     def _stop(self) -> None:
         self.player.stop()
@@ -190,7 +219,18 @@ class PlayerWindow(QWidget):
             event.accept()
             return
         if key == Qt.Key.Key_Escape:
-            self.close()
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.close()
+            event.accept()
+            return
+        if key == Qt.Key.Key_F:
+            self._toggle_fullscreen()
+            event.accept()
+            return
+        if key == Qt.Key.Key_R:
+            self._cycle_rate()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -204,6 +244,7 @@ class PlayerWindow(QWidget):
         self.close()
 
     def closeEvent(self, event) -> None:
+        config.save_setting("volume", self.vol.value())
         if not self._closing:
             pos = self.player.position() / 1000.0
             if pos < 5.0:
