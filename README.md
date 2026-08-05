@@ -1,0 +1,81 @@
+# VideoLib
+
+桌面视频管理工具 —— 用 PyQt6 + SQLite 管理硬盘上的视频文件，支持多目录索引、增量监控、中文全文搜索、分类与收藏、断点续播。
+
+## 功能特性
+
+- **多根目录索引**：可扫描多个目录，全库为所有目录的并集；`size + mtime` 增量比对，重扫已记忆目录秒级完成
+- **增量监控**：watchdog 实时监听当前目录，新增/删除/改名/修改 2 秒防抖自动同步
+- **元数据提取**：PyAV 读取时长、分辨率、编码，全部入库
+- **缩略图**：纯 PyAV 懒生成（170x96，16:9 裁切填满），后台线程池，失败自动记录日志
+- **中文全文搜索**：FTS5 全文 + LIKE 兜底，300ms 防抖搜索栏
+- **分类管理**：层级分类树（右键增删改），分类按扫描目录隔离，支持批量归类
+- **播放**：QMediaPlayer 播放器，断点续播 + 播放历史（最近播放视图），Enter/Space 快捷键
+- **收藏夹**：命名收藏夹（自动补前缀「收藏夹_」），右键批量收藏/移除
+- **历史目录管理**：「仅移除记录」（保留视频）/「删除并清除数据」（级联清除收藏与分类关联）双选项
+- **列表交互**：虚拟滚动、长文件名自动换行、行内播放按钮、批量操作、打开所在文件夹
+
+## 环境要求
+
+- Python 3.14+
+- Windows（打包脚本为 `.bat`；代码本身跨平台，仅打包与资源管理器集成依赖 Windows）
+
+## 安装与运行
+
+```bat
+pip install -r requirements.txt
+python main.py
+```
+
+常用 CLI 命令：
+
+```bat
+python cli.py index "E:\视频"   :: 命令行全量索引一个目录
+python cli.py stats             :: 查看库统计
+```
+
+## 打包为单文件 exe
+
+```bat
+build.bat
+```
+
+生成 `dist\VideoLib.exe`（约 83MB，免 Python 环境）。换机运行只需拷贝这一个文件，首次启动会自动创建数据目录。
+
+## 数据目录
+
+默认位于 `C:\Users\<用户名>\.videolib\`：
+
+| 文件 | 说明 |
+|------|------|
+| `videolib.db` | SQLite 数据库（WAL 模式，含 FTS5 全文索引） |
+| `thumbs/` | 视频缩略图 |
+| `settings.json` | 设置（当前监控目录等） |
+| `crash.log` / `thumbnails.log` | 崩溃与缩略图失败日志 |
+
+换机迁移：拷贝整个 `.videolib` 目录到新机器即可保留数据。可用环境变量 `VIDEOLIB_HOME` 指定数据目录（便于测试隔离）。
+
+## 开发
+
+```bat
+python -m pytest tests -q     :: 运行测试（54 个用例）
+```
+
+### 目录结构
+
+```
+videolib/
+├── main.py                  # 入口
+├── cli.py                   # 命令行工具（index / stats）
+├── config.py                # 路径、扩展名、设置读写
+├── domain/                  # 数据层（models + SQLite 仓库，唯一 SQL 入口）
+├── services/                # 扫描、元数据、缩略图、增量监控
+├── ui/                      # PyQt6 界面（主窗口、列表、播放器、分类树、对话框）
+└── tests/                   # pytest 测试
+```
+
+分层约定：UI 只调用 services / repository，repository 只碰 SQLite。
+
+## 技术栈
+
+PyQt6 · SQLite（WAL + FTS5）· PyAV · watchdog · PyInstaller · pytest
