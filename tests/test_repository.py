@@ -216,15 +216,69 @@ def test_favorite_list_migration(tmp_path):
 
 
 def test_play_history_and_resume(repo):
-    repo.upsert_videos([_mk("a.mp4", r"D:\v\a.mp4", duration=100.0)])
+    repo.upsert_videos([
+        _mk("a.mp4", r"D:\v\a.mp4", duration=100.0),
+        _mk("b.mp4", r"D:\v\b.mp4", duration=100.0),
+    ])
     a = repo.get_by_path(r"D:\v\a.mp4")
+    b = repo.get_by_path(r"D:\v\b.mp4")
     repo.record_play(a.id, 42.0)
     assert repo.last_position(a.id) == 42.0
     repo.record_play(a.id, 5.0)
     assert repo.last_position(a.id) == 5.0
     recent = repo.recent_plays(limit=10)
-    assert len(recent) == 2
+    assert len(recent) == 1, "replaying must not duplicate the entry"
     assert recent[0][0].position == 5.0
+    assert recent[0][1].id == a.id
+    repo.record_play(b.id, 10.0)
+    repo.record_play(a.id, 90.0)
+    recent = repo.recent_plays(limit=10)
+    assert [r[1].id for r in recent] == [a.id, b.id], "replay must bump the video to the top"
+
+
+def test_play_history_migration_dedupes(tmp_path):
+    """Legacy play_history (one row per play event) must collapse to one row
+    per video, keeping the latest play."""
+    import sqlite3
+
+    db = tmp_path / "old_history.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE videos (
+            id INTEGER PRIMARY KEY, filename TEXT NOT NULL,
+            filepath TEXT UNIQUE NOT NULL, file_size INTEGER DEFAULT 0,
+            duration REAL, resolution TEXT, codec TEXT, thumb_path TEXT,
+            scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE play_history (
+            id INTEGER PRIMARY KEY,
+            video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE,
+            played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            position REAL DEFAULT 0);
+    """)
+    conn.execute("INSERT INTO videos (id, filename, filepath) VALUES (1, 'a.mp4', 'D:/v/a.mp4')")
+    conn.execute("INSERT INTO videos (id, filename, filepath) VALUES (2, 'b.mp4', 'D:/v/b.mp4')")
+    conn.executemany(
+        "INSERT INTO play_history (id, video_id, played_at, position) VALUES (?, ?, ?, ?)",
+        [
+            (1, 1, "2026-01-01 10:00:00", 20.0),
+            (2, 2, "2026-01-01 10:00:10", 5.0),
+            (3, 1, "2026-01-01 10:00:20", 70.0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    repo = Repository(db)
+    try:
+        assert repo.last_position(1) == 70.0, "keep the latest play's resume point"
+        recent = repo.recent_plays(limit=10)
+        assert [r[1].id for r in recent] == [1, 2], "one entry per video, latest play first"
+        repo.record_play(2, 99.0)
+        assert [r[1].id for r in repo.recent_plays(limit=10)] == [2, 1]
+        repo.record_play(1, 1.0)
+        assert [r[1].id for r in repo.recent_plays(limit=10)] == [1, 2]
+    finally:
+        repo.close()
 
 
 def test_upsert_persists_mtime(repo):

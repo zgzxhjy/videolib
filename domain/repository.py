@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS video_categories (
 
 CREATE TABLE IF NOT EXISTS play_history (
     id INTEGER PRIMARY KEY,
-    video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE,
+    video_id INTEGER UNIQUE REFERENCES videos(id) ON DELETE CASCADE,
     played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     position REAL DEFAULT 0
 );
@@ -138,6 +138,28 @@ class Repository:
                     (cur.lastrowid,),
                 )
             self._conn.execute("DROP TABLE favorites")
+        if not self._play_history_deduped():
+            self._dedupe_play_history()
+
+    def _play_history_deduped(self) -> bool:
+        rows = self._conn.execute("PRAGMA index_list('play_history')").fetchall()
+        return any(r["unique"] and r["origin"] == "u" for r in rows)
+
+    def _dedupe_play_history(self) -> None:
+        """One row per video: keep the latest play (MAX id) for each video."""
+        self._conn.executescript(
+            """CREATE TABLE play_history_new (
+                id INTEGER PRIMARY KEY,
+                video_id INTEGER UNIQUE REFERENCES videos(id) ON DELETE CASCADE,
+                played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                position REAL DEFAULT 0
+            );
+            INSERT INTO play_history_new (id, video_id, played_at, position)
+                SELECT id, video_id, played_at, position FROM play_history
+                WHERE id IN (SELECT MAX(id) FROM play_history GROUP BY video_id);
+            DROP TABLE play_history;
+            ALTER TABLE play_history_new RENAME TO play_history;"""
+        )
 
     def _has_table(self, name: str) -> bool:
         row = self._conn.execute(
@@ -668,17 +690,28 @@ class Repository:
     # ---------- play history ----------
 
     def record_play(self, video_id: int, position: float = 0.0) -> None:
+        """Replaying a video updates its row (played_at + position) instead of
+        appending a duplicate, so the recent list stays one entry per video.
+        The rowid is bumped so same-second ties still order by latest play."""
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO play_history (video_id, position) VALUES (?, ?)",
-                (video_id, position),
+            cur = self._conn.execute(
+                """UPDATE play_history
+                   SET id = (SELECT COALESCE(MAX(id), 0) + 1 FROM play_history),
+                       played_at = CURRENT_TIMESTAMP, position = ?
+                   WHERE video_id = ?""",
+                (position, video_id),
             )
+            if cur.rowcount == 0:
+                self._conn.execute(
+                    "INSERT INTO play_history (video_id, position) VALUES (?, ?)",
+                    (video_id, position),
+                )
             self._conn.commit()
 
     def last_position(self, video_id: int) -> float:
         with self._lock:
             row = self._conn.execute(
-                "SELECT position FROM play_history WHERE video_id = ? ORDER BY id DESC LIMIT 1",
+                "SELECT position FROM play_history WHERE video_id = ?",
                 (video_id,),
             ).fetchone()
             return row["position"] if row else 0.0
@@ -691,9 +724,7 @@ class Repository:
             rows = self._conn.execute(
                 f"""SELECT video_id, position
                     FROM play_history
-                    WHERE video_id IN ({",".join("?" * len(video_ids))})
-                    GROUP BY video_id
-                    HAVING id = MAX(id)""",
+                    WHERE video_id IN ({",".join("?" * len(video_ids))})""",
                 video_ids,
             ).fetchall()
             return {r["video_id"]: r["position"] for r in rows}

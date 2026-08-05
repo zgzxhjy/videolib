@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-04（会话 4 结束：交互优化 + 删除功能）
+> 最后更新：2026-08-05（会话 6：最近播放去重 + README 同步）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -121,6 +121,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 排序（会话 5）：_natkey 自然键（v2 < v10）+ 表头点击 + 持久化；sort() 用 layoutChanged 重映射（reset 会递归崩）
 - [x] 断点标记（会话 5）：last_positions 批量查询 + 时长列 ⏵ 前缀（5s < pos < 90% 时长）+ tooltip 续播位置
 - [x] 播放队列（会话 5）：PlayerWindow(queue=...) + ⏮⎭ 按钮 + 自然结束自动续播（EndOfMedia 非最后一条则 record_play(0) 后 _load 下一条，_closing 防误触发）
+- [x] 最近播放去重（会话 6）：play_history 每视频一行（video_id UNIQUE），record_play 改 UPDATE-then-INSERT（rowid 自增式 bump 保持同秒排序），老库自动去重迁移（保留每视频 MAX(id) 行=最新一次播放）；last_position/last_positions 简化（恒一行）
 - [ ] 超大库分页/懒加载（当前 all_videos LIMIT 500）
 
 ## 8. 遗留问题（如遇到优先排查）
