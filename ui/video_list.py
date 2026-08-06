@@ -70,7 +70,10 @@ class ThumbRunnable(QRunnable):
         self.cb = cb
 
     def run(self):
-        ok = Thumbnailer().ensure(self.filepath, self.video_id, repo=self.repo)
+        try:
+            ok = Thumbnailer().ensure(self.filepath, self.video_id, repo=self.repo)
+        except Exception:
+            ok = False  # a thumbnail failure must never kill the pool thread
         if ok:
             self.cb.thumb_ready.emit(self.video_id)
         else:
@@ -424,6 +427,15 @@ class VideoTableModel(QAbstractTableModel):
             v = self.video_at(self._id_to_row[vid]) if vid in self._id_to_row else None
             if v is not None:
                 self._schedule(v)
+
+    def shutdown(self) -> None:
+        """Drain in-flight thumbnail generation before the window goes away.
+
+        A ThumbRunnable runs real ffmpeg work; leaving the pool alive past the
+        window's lifetime destroys the QThreadPool while tasks are still
+        running, which is a hard native crash at process exit."""
+        self._pool.clear()
+        self._pool.waitForDone()
 
     def _on_thumb_ready(self, video_id: int) -> None:
         thumb = self._thumb_path(video_id)

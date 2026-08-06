@@ -37,7 +37,11 @@ class ScanWorker(QThread):
                 status = "empty"
                 return
             self.message.emit(f"发现 {len(files)} 个视频文件，正在比对变化...")
-            need_probe, stale = diff_scan(files, self._repo.existing_under(self._root))
+            need_probe, stale = diff_scan(
+                files,
+                self._repo.existing_under(self._root),
+                missing_meta=self._repo.missing_metadata_under(self._root),
+            )
             skipped = len(files) - len(need_probe)
             self.message.emit(f"{len(need_probe)} 个文件需要更新元数据（跳过 {skipped} 个未变化）")
 

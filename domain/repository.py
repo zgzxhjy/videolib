@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 from domain.models import Category, FavoriteList, PlayRecord, Video
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS videos (
     duration REAL,
     resolution TEXT,
     codec TEXT,
+    probe_retry_at REAL,
     thumb_path TEXT,
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -126,6 +128,8 @@ class Repository:
         video_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(videos)")}
         if "file_mtime" not in video_cols:
             self._conn.execute("ALTER TABLE videos ADD COLUMN file_mtime REAL")
+        if "probe_retry_at" not in video_cols:
+            self._conn.execute("ALTER TABLE videos ADD COLUMN probe_retry_at REAL")
         cat_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(categories)")}
         if "root" not in cat_cols:
             self._conn.execute("ALTER TABLE categories ADD COLUMN root TEXT NOT NULL DEFAULT ''")
@@ -301,6 +305,56 @@ class Repository:
                 (lo, hi),
             ).fetchall()
             return {r["filepath"]: (r["file_size"], r["file_mtime"]) for r in rows}
+
+    def missing_metadata_under(self, root: str) -> set[str]:
+        """Filepaths under root whose probe produced no metadata at all
+        (duration/resolution/codec all NULL); scans re-probe them regardless
+        of mtime. Rows with partial metadata were probed successfully once
+        and must not be clobbered by a re-probe."""
+        prefix = os.path.normpath(root) + os.sep
+        lo, hi = _prefix_bounds(prefix)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT filepath FROM videos
+                   WHERE filepath >= ? AND filepath < ?
+                     AND duration IS NULL AND resolution IS NULL AND codec IS NULL""",
+                (lo, hi),
+            ).fetchall()
+            return {r["filepath"] for r in rows}
+
+    def missing_metadata_files(self, cutoff: float | None = None) -> list[Video]:
+        """Videos whose probe produced no metadata at all (all three fields
+        NULL), optionally only those not retried since `cutoff` (epoch
+        seconds). Used by the startup repair pass; a probe failure stamps
+        probe_retry_at so permanently broken files are retried at most once
+        per cooldown. Partial rows (any field set) are left alone: they were
+        probed successfully and a re-probe of a now-unreachable file would
+        only wipe the good data."""
+        where = "duration IS NULL AND resolution IS NULL AND codec IS NULL"
+        params: tuple = ()
+        if cutoff is not None:
+            where += " AND (probe_retry_at IS NULL OR probe_retry_at < ?)"
+            params = (cutoff,)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM videos WHERE {where} ORDER BY filepath", params
+            ).fetchall()
+            return [_row_to_video(r) for r in rows]
+
+    def mark_probe_failed(self, paths: list[str]) -> None:
+        """Stamp probe_retry_at=now for failed probe paths (retry cooldown).
+
+        Only touches probe_retry_at, which is not part of the FTS index
+        (filename/filepath are), so no FTS rebuild is needed here."""
+        if not paths:
+            return
+        now = time.time()
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE videos SET probe_retry_at = ? WHERE filepath = ?",
+                [(now, p) for p in paths],
+            )
+            self._conn.commit()
 
     def remove_by_filepaths(self, paths: list[str]) -> list[int]:
         """Delete videos by filepath, returning the deleted video ids."""

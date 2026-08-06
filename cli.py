@@ -14,7 +14,11 @@ def cmd_index(args) -> None:
     files = scan_directory(args.root)
     print(f"found {len(files)} video files in {time.perf_counter() - start:.1f}s")
 
-    need_probe, stale = diff_scan(files, repo.existing_under(args.root))
+    need_probe, stale = diff_scan(
+        files,
+        repo.existing_under(args.root),
+        missing_meta=repo.missing_metadata_under(args.root),
+    )
     print(f"{len(need_probe)} to probe, {len(stale)} stale under root")
 
     result = Library(repo).apply_sync(

@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -115,3 +116,61 @@ def test_watcher_skips_missing_root_keeps_others(qapp, tmp_path):
         thread.stop()
         thread.wait(5000)
         repo.close()
+
+
+def test_flush_survives_concurrent_mutation(watch_env, monkeypatch):
+    """Watchdog events arriving while _flush drains must never raise.
+
+    The old code iterated the shared sets directly, so an event landing in
+    the middle of a flush raised "Set changed size during iteration". That
+    exception escapes QThread.run(), which PyQt6 turns into a hard process
+    abort (0xc0000409) - the startup flash-crash on the real library.
+    """
+    from services import watcher as watcher_mod
+
+    calls: list[tuple[list, list]] = []
+
+    class _FakeLibrary:
+        def __init__(self, repo):
+            pass
+
+        def apply_sync(self, probes, removals, progress=None, should_cancel=None):
+            calls.append((list(probes), list(removals)))
+
+    monkeypatch.setattr(watcher_mod, "Library", _FakeLibrary)
+
+    repo, root = watch_env
+    thread = WatcherThread(str(root), repo)
+    stop = False
+
+    def mutator():
+        i = 0
+        while not stop:
+            i += 1
+            with thread._lock:
+                thread._changed.add(f"ghost_{i}.mp4")
+                thread._added[f"ghost_{i}.mp4"] = time.time()
+            time.sleep(0.0005)
+
+    t = threading.Thread(target=mutator, daemon=True)
+    t.start()
+    try:
+        for _ in range(50):
+            thread._flush()  # must never raise, whatever the mutator does
+            time.sleep(0.0005)
+    finally:
+        stop = True
+        t.join(5)
+    assert calls, "flush must still hand a consistent batch to apply_sync"
+    assert repo.count() == 0
+
+
+def test_flush_indexes_pending_changes_directly(watch_env):
+    """_flush applies added paths without needing the observer plumbing."""
+    repo, root = watch_env
+    thread = WatcherThread(str(root), repo)
+    f = root / "v.mp4"
+    _make_test_video(f)
+    thread._added[str(f)] = time.time()
+    thread._flush()
+    assert repo.get_by_path(str(f)) is not None

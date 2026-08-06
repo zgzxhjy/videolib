@@ -19,11 +19,14 @@ def scan_directory(root: str) -> list[str]:
 def diff_scan(
     files: list[str],
     existing: dict[str, tuple[int, float | None]],
+    missing_meta: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Compare found files against known records (filepath -> (size, mtime)).
 
     Returns (need_probe, stale): files whose size/mtime changed (or are new),
-    and previously-known paths under the same root that no longer exist.
+    previously-known paths under the same root that no longer exist, plus
+    `missing_meta` paths (rows whose metadata probe failed previously) so a
+    re-scan retries them even when the file is unchanged.
     """
     existing_paths = set(existing)
     files_set = set(files)
@@ -41,5 +44,8 @@ def diff_scan(
         mtime_ok = cur[1] is not None and abs(cur[1] - st.st_mtime) < 1.0
         if not (size_ok and mtime_ok):
             need_probe.append(fp)
+    if missing_meta:
+        seen = set(need_probe)
+        need_probe.extend(p for p in files if p in missing_meta and p not in seen)
     stale = [p for p in existing_paths if p not in files_set]
     return need_probe, stale

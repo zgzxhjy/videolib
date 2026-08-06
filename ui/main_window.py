@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QByteArray, QFile, QProcess, QSize, Qt, QThread, QTimer
@@ -60,8 +61,47 @@ class _OrphanCleanupThread(QThread):
         self.removed = 0
 
     def run(self) -> None:
-        valid = self._repo.all_video_ids()
-        self.removed = Thumbnailer.cleanup_orphans(config.THUMBS_DIR, valid)
+        try:
+            valid = self._repo.all_video_ids()
+            self.removed = Thumbnailer.cleanup_orphans(config.THUMBS_DIR, valid)
+        except Exception:
+            pass  # cleanup is best-effort; never let it crash via QThread.run
+
+
+PROBE_RETRY_COOLDOWN = 86400  # seconds; failed probes retried at most once a day
+
+
+class _MetadataRepairThread(QThread):
+    """Re-probes videos whose metadata is missing (failed probe earlier).
+
+    Runs once at startup: a packaging bug used to make probes fail silently
+    for whole classes of files (e.g. subtitle-carrying videos in the frozen
+    exe), leaving rows with NULL duration/resolution/codec. Retried rows are
+    stamped probe_retry_at on failure so permanently broken files are not
+    hammered on every launch.
+    """
+
+    def __init__(self, repo: Repository, parent=None):
+        super().__init__(parent)
+        self._repo = repo
+        self.probed = 0
+        self.fixed = 0
+
+    def run(self) -> None:
+        try:
+            cutoff = time.time() - PROBE_RETRY_COOLDOWN
+            missing = self._repo.missing_metadata_files(cutoff)
+            if not missing:
+                return
+            paths = [v.filepath for v in missing]
+            result = Library(self._repo).apply_sync(paths, [])
+            still = {v.filepath for v in self._repo.missing_metadata_files(cutoff)}
+            failed = [p for p in paths if p in still]
+            self._repo.mark_probe_failed(failed)
+            self.probed = result.probed
+            self.fixed = result.probed - len(failed)
+        except Exception:
+            pass  # repair is best-effort; never let it crash the app
 
 
 class MainWindow(QMainWindow):
@@ -75,6 +115,7 @@ class MainWindow(QMainWindow):
         self._watcher: WatcherThread | None = None
         self._scanner: ScanWorker | None = None
         self._cleanup_thread: _OrphanCleanupThread | None = None
+        self._repair_thread: _MetadataRepairThread | None = None
         self.setWindowTitle(f"{config.APP_NAME} - 视频管理")
         self.resize(1100, 700)
         self.setAcceptDrops(True)
@@ -113,6 +154,11 @@ class MainWindow(QMainWindow):
         self._cleanup_timer.setSingleShot(True)
         self._cleanup_timer.timeout.connect(self._start_orphan_cleanup)
         self._cleanup_timer.start(0)
+
+        self._repair_timer = QTimer(self)
+        self._repair_timer.setSingleShot(True)
+        self._repair_timer.timeout.connect(self._start_metadata_repair)
+        self._repair_timer.start(0)
 
         roots = self._watch_roots()
         if roots:
@@ -181,6 +227,24 @@ class MainWindow(QMainWindow):
                 f"已清理 {self._cleanup_thread.removed} 个孤儿缩略图"
             )
 
+    def _start_metadata_repair(self) -> None:
+        self._repair_thread = _MetadataRepairThread(self._repo, self)
+        self._repair_thread.finished.connect(self._on_metadata_repair_done)
+        self._repair_thread.start()
+
+    def _on_metadata_repair_done(self) -> None:
+        t = self._repair_thread
+        if t is None or not t.fixed:
+            return
+        self.statusBar().showMessage(f"已补全 {t.fixed} 个视频的缺失元数据")
+        self._set_view(self._view)
+
+    def _stop_metadata_repair(self) -> None:
+        self._repair_timer.stop()
+        if self._repair_thread is not None and self._repair_thread.isRunning():
+            self._repair_thread.wait(3000)
+            self._repair_thread = None
+
     def _stop_watcher(self) -> None:
         if self._watcher is not None:
             self._watcher.stop()
@@ -208,6 +272,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self._save_ui_state()
         self._stop_orphan_cleanup()
+        self._stop_metadata_repair()
+        self.model.shutdown()
         self._stop_watcher()
         super().closeEvent(event)
 
@@ -440,6 +506,8 @@ class MainWindow(QMainWindow):
             pass
         self._stop_watcher()
         self._stop_orphan_cleanup()
+        self._stop_metadata_repair()
+        self.model.shutdown()
         self.statusBar().showMessage("正在还原...")
         QApplication.processEvents()
         try:
