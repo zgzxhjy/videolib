@@ -381,12 +381,14 @@ class VideoTableModel(QAbstractTableModel):
         self._pool.start(runnable)
 
     def regenerate_thumbs(self, video_ids: list[int]) -> None:
-        """Delete the thumbnail files so the ids re-generate on next paint."""
+        """Delete the thumbnail files so the ids re-generate on next paint.
+        The in-memory pixmaps are kept: cells keep showing the old thumbnail
+        until the new one is ready (atomic swap), so a mass regeneration never
+        flashes a blank/black thumbnail column."""
         Thumbnailer().delete_for(video_ids)
         with self._lock:
             for vid in video_ids:
                 self._requested.discard(vid)
-                self._pix_cache.pop(vid, None)
         for vid in video_ids:
             v = self.video_at(self._id_to_row[vid]) if vid in self._id_to_row else None
             if v is not None:
@@ -399,11 +401,13 @@ class VideoTableModel(QAbstractTableModel):
             pixmap.setDevicePixelRatio(THUMB_SCALE)
             if not pixmap.isNull():
                 self._cache_pixmap(video_id, pixmap)
-        row = self._id_to_row.get(video_id)
-        if row is None:
-            return
-        idx = self.index(row, COL_THUMB)
-        self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+                row = self._id_to_row.get(video_id)
+                if row is not None:
+                    idx = self.index(row, COL_THUMB)
+                    self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+                    return
+        with self._lock:
+            self._requested.discard(video_id)
 
     def _on_thumb_failed(self, video_id: int) -> None:
         # drop the request so the next scroll/paint retries (a transient

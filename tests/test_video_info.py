@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -60,7 +61,7 @@ def test_video_info_shows_all_fields(qapp, repo):
         assert "01:05" in text  # 65.5s
         assert "1920x1080" in text
         assert "h264" in text
-        assert "2026-08-05" in text  # scanned_at
+        assert re.search(r"\d{4}-\d{2}-\d{2}", text)  # scanned_at (DB CURRENT_TIMESTAMP)
         assert "2023-11-15" in text  # file_mtime epoch (local tz)
         assert "动作" in text  # categories_of_video
         assert "收藏夹_测试" in text  # lists_of_video

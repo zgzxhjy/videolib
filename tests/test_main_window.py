@@ -49,6 +49,49 @@ def _make_window(app_env):
     return w
 
 
+def test_regenerate_keeps_cached_pixmap_until_ready(qapp, app_env):
+    """Mass regeneration must not blank the thumbnail column: old pixmaps
+    stay cached until the new file lands (atomic swap on the write side)."""
+    from PyQt6.QtGui import QPixmap
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    w = _make_window(app_env)
+    try:
+        model = w.model
+        vid = model.all_videos()[0].id
+        thumb = model._thumb_path(vid)
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        pix = QPixmap(340, 192)
+        pix.fill(Qt.GlobalColor.red)
+        assert pix.save(str(thumb))
+        model._pix_cache[vid] = pix
+        model.regenerate_thumbs([vid])
+        assert vid in model._pix_cache, "old pixmap must survive until the new one is ready"
+    finally:
+        w.close()
+
+
+def test_thumb_ready_null_decodes_drop_request_for_retry(qapp, app_env):
+    """A corrupt JPEG that cannot be decoded must not poison the session:
+    its id leaves _requested so a later paint/refresh retries generation."""
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    w = _make_window(app_env)
+    try:
+        model = w.model
+        vid = model.all_videos()[0].id
+        thumb = model._thumb_path(vid)
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        thumb.write_bytes(b"\xff\xd8\xff\xe0 corrupt-not-a-jpeg")
+        with model._lock:
+            model._requested.add(vid)
+        model._on_thumb_ready(vid)
+        with model._lock:
+            assert vid not in model._requested, "undecodable thumb must stay retriable"
+        assert vid not in model._pix_cache
+    finally:
+        w.close()
+
+
 def test_title_column_stretches(qapp, app_env):
     """Stretch/ResizeToContents must be honored after setModel (regression: was 100px)."""
     _mk_video(app_env, "超" * 40 + ".mp4", "D:/x/" + "超" * 40 + ".mp4")

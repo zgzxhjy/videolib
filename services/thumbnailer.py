@@ -1,3 +1,4 @@
+import os
 import threading
 from pathlib import Path
 
@@ -13,6 +14,14 @@ THUMB_ASPECT = THUMB_WIDTH / THUMB_HEIGHT  # ~16:9, crops source to fill
 THUMB_SCALE = 2  # generate at 2x so HiDPI displays stay crisp
 THUMB_PIXEL_WIDTH = THUMB_WIDTH * THUMB_SCALE
 THUMB_PIXEL_HEIGHT = THUMB_HEIGHT * THUMB_SCALE
+
+# In-flight generation guard. Module-level (not per Thumbnailer instance):
+# every UI caller constructs a fresh Thumbnailer per task, so an instance
+# lock could never deduplicate across those tasks. Keyed by video id; a
+# second ensure for an id still being written returns False and the caller
+# retries later instead of racing the same output file.
+_PENDING_LOCK = threading.Lock()
+_PENDING: set[int] = set()
 
 
 def _log_failure(filepath: str, exc: Exception) -> None:
@@ -59,7 +68,11 @@ def _center_crop(frame: av.VideoFrame) -> av.VideoFrame:
 
 
 def _extract_frame(filepath: str, thumb_path: Path) -> bool:
-    """Seek to ~10% of the video, crop-fill and scale one frame, save as JPEG (pure PyAV)."""
+    """Seek to ~10% of the video, crop-fill and scale one frame, save as JPEG
+    (pure PyAV). Writes to a temp file and atomically renames it into place,
+    so a failure mid-write can never leave a truncated/black thumbnail behind
+    (and an existing good thumbnail survives a failed regeneration)."""
+    tmp = thumb_path.with_name(thumb_path.name + ".tmp")
     try:
         with av.open(filepath) as container:
             stream = next(
@@ -77,7 +90,7 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
                 height=THUMB_PIXEL_HEIGHT,
                 format="yuv420p",
             )
-            with av.open(str(thumb_path), "w") as out:
+            with av.open(str(tmp), "w", format="mjpeg") as out:
                 jpeg = out.add_stream("mjpeg")
                 jpeg.width = scaled.width
                 jpeg.height = scaled.height
@@ -86,10 +99,17 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
                     out.mux(packet)
                 for packet in jpeg.encode():
                     out.mux(packet)
-            return True
+        os.replace(tmp, thumb_path)
+        return True
     except Exception as exc:
         _log_failure(filepath, exc)
         return False
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def _is_stale_thumb(thumb_path: Path) -> bool:
@@ -114,8 +134,6 @@ class Thumbnailer:
     def __init__(self, thumbs_dir: str | Path | None = None):
         self._dir = Path(thumbs_dir or config.THUMBS_DIR)
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._pending: set[str] = set()
 
     @staticmethod
     def path(thumbs_dir: str | Path, video_id: int) -> Path:
@@ -130,22 +148,23 @@ class Thumbnailer:
 
     def ensure(self, filepath: str, video_id: int, repo=None) -> bool:
         """Generate thumb if missing (or zero-byte/old-resolution). When repo
-        is given, persist thumb_path."""
+        is given, persist thumb_path. Returns False while another thread is
+        already generating the same id; the caller may retry later."""
         thumb = self.path_for(video_id)
         if thumb.exists() and thumb.stat().st_size > 0 and not _is_stale_thumb(thumb):
             return True
-        with self._lock:
-            if filepath in self._pending:
+        with _PENDING_LOCK:
+            if video_id in _PENDING:
                 return False
-            self._pending.add(filepath)
+            _PENDING.add(video_id)
         try:
             ok = _extract_frame(filepath, thumb)
             if ok and repo is not None:
                 repo.set_thumb(video_id, str(thumb))
             return ok
         finally:
-            with self._lock:
-                self._pending.discard(filepath)
+            with _PENDING_LOCK:
+                _PENDING.discard(video_id)
 
     @staticmethod
     def cleanup_orphans(thumbs_dir: str | Path, valid_ids: set[int]) -> int:
@@ -163,6 +182,12 @@ class Thumbnailer:
                     removed += 1
                 except OSError:
                     pass
+        for f in Path(thumbs_dir).glob("*.jpg.tmp"):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
         return removed
 
     def delete_for(self, ids) -> int:

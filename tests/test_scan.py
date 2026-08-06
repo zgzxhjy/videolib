@@ -187,6 +187,66 @@ def test_thumbnail_persisted_to_repo(video_dir, tmp_path):
     repo.close()
 
 
+def test_thumbnail_failure_keeps_existing_good_thumb(video_dir, tmp_path, monkeypatch):
+    """A failed regeneration must leave the previous good thumbnail in place:
+    the write goes to a .tmp file first, so a mid-write failure can never
+    leave a truncated/black {id}.jpg that would stick forever."""
+    import os as _os
+
+    from services import thumbnailer as T
+
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    assert thumbs.ensure(str(video_dir), video_id=5) is True
+    good = thumbs.path_for(5).read_bytes()
+
+    def boom_replace(src, dst):
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(_os, "replace", boom_replace)
+    assert T._extract_frame(str(video_dir), thumbs.path_for(5)) is False
+    assert thumbs.path_for(5).read_bytes() == good, "old thumb must survive a failed regen"
+    assert not list((tmp_path / "thumbs").glob("*.jpg.tmp")), "tmp must be swept on failure"
+
+    # and with no prior thumb, a failed generation leaves neither file
+    monkeypatch.setattr(_os, "replace", boom_replace)
+    assert T._extract_frame(str(video_dir), thumbs.path_for(8)) is False
+    assert not thumbs.path_for(8).exists()
+    assert not list((tmp_path / "thumbs").glob("*.jpg.tmp"))
+
+
+def test_ensure_dedups_across_instances(video_dir, tmp_path, monkeypatch):
+    """The UI builds a fresh Thumbnailer per background task; the in-flight
+    guard must therefore be global, or two tasks for the same video id would
+    open the same {id}.jpg for writing concurrently and corrupt it."""
+    import threading
+
+    from services import thumbnailer as T
+
+    started = threading.Event()
+    release = threading.Event()
+    real_extract = T._extract_frame
+
+    def slow_extract(filepath, thumb):
+        started.set()
+        assert release.wait(5)
+        return real_extract(filepath, thumb)
+
+    monkeypatch.setattr(T, "_extract_frame", slow_extract)
+    t = threading.Thread(
+        target=lambda: T.Thumbnailer(tmp_path / "a").ensure(str(video_dir), 42)
+    )
+    t.start()
+    assert started.wait(5)
+    try:
+        second = T.Thumbnailer(tmp_path / "b").ensure(str(video_dir), 42)
+        assert second is False, "an in-flight id must be rejected across instances"
+    finally:
+        release.set()
+        t.join(5)
+    assert not t.is_alive()
+    assert T.Thumbnailer(tmp_path / "a").path_for(42).exists()
+
+
 def test_thumbnail_no_repeat_work(video_dir, tmp_path):
     thumbs = Thumbnailer(tmp_path / "thumbs")
     assert thumbs.ensure(str(video_dir), 1) is True
@@ -222,6 +282,11 @@ def test_cleanup_orphans_removes_zero_byte_and_orphans(tmp_path):
 
     removed = Thumbnailer.cleanup_orphans(d, valid_ids={1})
     assert removed == 1, "orphan 3.jpg must be removed now"
+
+    (d / "9.jpg.tmp").write_bytes(b"partial")  # leftover from interrupted write
+    removed = Thumbnailer.cleanup_orphans(d, valid_ids={1})
+    assert removed == 1, "stale .tmp files must be swept"
+    assert not (d / "9.jpg.tmp").exists()
 
 
 def test_delete_for_removes_only_target_thumbs(tmp_path):
