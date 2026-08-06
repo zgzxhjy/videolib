@@ -56,6 +56,8 @@ build.bat
 | `thumbs/` | 视频缩略图 |
 | `settings.json` | 设置（当前监控目录等） |
 | `backups/` | 数据库自动备份（启动每日一份 + 删除操作前强制快照，保留最新 5 份） |
+
+工具栏「备份与还原 ▾」：立即备份 / 从备份还原... / 打开备份文件夹。还原流程：先自动备份当前库 → 清空缩略图（防 video id 复用显示旧图）→ 用所选框覆盖现场库 → 自动重启应用。手动还原亦可把 `backups/videolib-*.db` 复制为 `videolib.db`（需先删除 `-wal`/`-shm`）后重启。
 | `crash.log` / `thumbnails.log` | 崩溃与缩略图失败日志 |
 
 换机迁移：拷贝整个 `.videolib` 目录到新机器即可保留数据。可用环境变量 `VIDEOLIB_HOME` 指定数据目录（便于测试隔离）。
@@ -63,7 +65,7 @@ build.bat
 ## 开发
 
 ```bat
-python -m pytest tests -q     :: 运行测试（131 个用例）
+python -m pytest tests -q     :: 运行测试（142 个用例）
 ```
 
 ### 目录结构

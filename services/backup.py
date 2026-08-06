@@ -1,7 +1,9 @@
 """Database snapshots: one per day at startup, one before every destructive
-operation, keeping the newest BACKUP_KEEP files."""
+operation, keeping the newest BACKUP_KEEP files. `restore_backup` rewinds the
+live DB to a chosen snapshot (after snapshotting the pre-restore state)."""
 
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +32,47 @@ def backup_db(repo: Repository, force: bool = False) -> Path | None:
     repo.backup_to(dest)
     _rotate(config.BACKUPS_DIR)
     return dest
+
+
+def list_backups(dir: str | Path | None = None) -> list[Path]:
+    """Snapshot files, newest first (name embeds a sortable timestamp)."""
+    dir = Path(dir or config.BACKUPS_DIR)
+    return sorted(
+        (f for f in dir.glob("videolib-*.db") if _PATTERN.match(f.name)),
+        key=lambda f: f.name,
+        reverse=True,
+    )
+
+
+def restore_backup(repo: Repository, backup_path: str | Path) -> Path:
+    """Rewind the live DB to a snapshot.
+
+    1. snapshot the pre-restore state (so the restore stays reversible);
+    2. drop WAL side-cars so SQLite cannot replay stale frames over the copy;
+    3. wipe thumbnails — ids get reused by older libs, so a kept {id}.jpg
+       could otherwise show another video's frame (the ids rule);
+    4. close the repo and copy the backup over the live DB.
+
+    Callers must relaunch the app afterwards (the repo is closed here) and
+    stop scans/watcher/cleanup threads first. Returns the live DB path."""
+    backup_path = Path(backup_path)
+    backup_db(repo, force=True)
+    db = Path(config.DB_PATH)
+    for side in (db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+        try:
+            if side.exists():
+                side.unlink()
+        except OSError:
+            pass
+    for f in config.THUMBS_DIR.glob("*.jpg"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    repo.close()
+    config.APP_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup_path, db)
+    return db
 
 
 def _rotate(dir: Path, keep: int | None = None) -> None:

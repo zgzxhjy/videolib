@@ -1,8 +1,9 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QFile, QSize, Qt, QThread, QTimer
+from PyQt6.QtCore import QByteArray, QFile, QProcess, QSize, Qt, QThread, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -222,6 +223,13 @@ class MainWindow(QMainWindow):
         tb.addAction("刷新", self._refresh_all)
         tb.addAction("统计", self._show_stats)
         tb.addAction("查找重复", self._find_duplicates)
+        self._backup_menu = QMenu(self)
+        self._backup_menu.addAction("立即备份", self._backup_now)
+        self._backup_menu.addAction("从备份还原...", self._open_restore_dialog)
+        self._backup_menu.addSeparator()
+        self._backup_menu.addAction("打开备份文件夹", self._open_backup_folder)
+        self._backup_action = tb.addAction("备份与还原")
+        self._backup_action.setMenu(self._backup_menu)
         tb.addSeparator()
         tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
@@ -395,6 +403,59 @@ class MainWindow(QMainWindow):
     def _refresh_all(self) -> None:
         self.tree.reload()
         self._set_view(self._view)
+
+    def _backup_now(self) -> None:
+        from services.backup import backup_db
+
+        dest = backup_db(self._repo, force=True)
+        if dest is None:
+            self.statusBar().showMessage("备份失败")
+            return
+        self.statusBar().showMessage(f"已备份: {dest}")
+
+    def _open_backup_folder(self) -> None:
+        config.BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(config.BACKUPS_DIR))
+
+    def _open_restore_dialog(self) -> None:
+        from ui.dialogs.restore_backup import RestoreBackupDialog
+
+        dialog = RestoreBackupDialog(self._repo, self)
+        dialog.exec()
+        if dialog.restore_choice is None:
+            return
+        self._restore_from_backup(dialog.restore_choice)
+
+    def _restore_from_backup(self, backup_path) -> None:
+        """Close everything, rewind the live DB to the snapshot, relaunch."""
+        from services.backup import restore_backup
+
+        try:
+            self._cancel_scan()
+        except Exception:
+            pass
+        self._stop_watcher()
+        self._stop_orphan_cleanup()
+        self.statusBar().showMessage("正在还原...")
+        QApplication.processEvents()
+        try:
+            restore_backup(self._repo, backup_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "还原失败",
+                f"还原失败: {exc}\n当前数据库已自动备份，可手动恢复。",
+            )
+            return
+        self._relaunch()
+
+    def _relaunch(self) -> None:
+        if getattr(sys, "frozen", False):
+            QProcess.startDetached(sys.executable, [])
+        else:
+            script = Path(sys.argv[0]).resolve()
+            QProcess.startDetached(sys.executable, [str(script)])
+        QApplication.quit()
 
     def _show_stats(self) -> None:
         from ui.video_list import _fmt_duration, _fmt_size
