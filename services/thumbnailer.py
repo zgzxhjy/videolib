@@ -1,4 +1,5 @@
 import os
+import random
 import threading
 from pathlib import Path
 
@@ -14,6 +15,9 @@ THUMB_ASPECT = THUMB_WIDTH / THUMB_HEIGHT  # ~16:9, crops source to fill
 THUMB_SCALE = 2  # generate at 2x so HiDPI displays stay crisp
 THUMB_PIXEL_WIDTH = THUMB_WIDTH * THUMB_SCALE
 THUMB_PIXEL_HEIGHT = THUMB_HEIGHT * THUMB_SCALE
+
+THUMB_POS_MIN = 0.10  # earliest relative position the frame may be sampled from
+THUMB_POS_MAX = 0.90  # latest relative position
 
 # In-flight generation guard. Module-level (not per Thumbnailer instance):
 # every UI caller constructs a fresh Thumbnailer per task, so an instance
@@ -68,10 +72,12 @@ def _center_crop(frame: av.VideoFrame) -> av.VideoFrame:
 
 
 def _extract_frame(filepath: str, thumb_path: Path) -> bool:
-    """Seek to ~10% of the video, crop-fill and scale one frame, save as JPEG
-    (pure PyAV). Writes to a temp file and atomically renames it into place,
-    so a failure mid-write can never leave a truncated/black thumbnail behind
-    (and an existing good thumbnail survives a failed regeneration)."""
+    """Seek to a random spot between 10% and 90% of the video, crop-fill and
+    scale one frame, save as JPEG (pure PyAV). Falls back to the first frame
+    when a sampled spot yields no decodable frame. Writes to a temp file and
+    atomically renames it into place, so a failure mid-write can never leave a
+    truncated/black thumbnail behind (and an existing good thumbnail survives
+    a failed regeneration)."""
     tmp = thumb_path.with_name(thumb_path.name + ".tmp")
     try:
         with av.open(filepath) as container:
@@ -81,10 +87,19 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
             if stream is None:
                 raise ValueError("no video stream")
             stream.thread_type = "AUTO"
+            frame = None
             if stream.duration:
-                seek_pts = int(stream.duration * 0.1)
+                seek_pts = int(
+                    stream.duration * random.uniform(THUMB_POS_MIN, THUMB_POS_MAX)
+                )
                 container.seek(seek_pts, backward=True, any_frame=False, stream=stream)
-            frame = next(container.decode(video=0))
+                try:
+                    frame = next(container.decode(video=0))
+                except StopIteration:
+                    frame = None
+            if frame is None:
+                container.seek(0)
+                frame = next(container.decode(video=0))
             scaled = _center_crop(frame).reformat(
                 width=THUMB_PIXEL_WIDTH,
                 height=THUMB_PIXEL_HEIGHT,

@@ -247,6 +247,26 @@ def test_ensure_dedups_across_instances(video_dir, tmp_path, monkeypatch):
     assert T.Thumbnailer(tmp_path / "a").path_for(42).exists()
 
 
+def test_thumbnail_seek_fraction_within_range(video_dir, tmp_path, monkeypatch):
+    """The sampled frame position must lie inside [10%, 90%] of the video."""
+    from services import thumbnailer as T
+
+    calls = []
+
+    def fake_uniform(lo, hi):
+        calls.append((lo, hi))
+        return 0.5
+
+    monkeypatch.setattr(T.random, "uniform", fake_uniform)
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    assert thumbs.ensure(str(video_dir), video_id=9) is True
+    assert calls, "random.uniform must be consulted for the seek position"
+    lo, hi = calls[0]
+    assert lo == T.THUMB_POS_MIN
+    assert hi == T.THUMB_POS_MAX
+    assert thumbs.path_for(9).exists()
+
+
 def test_thumbnail_no_repeat_work(video_dir, tmp_path):
     thumbs = Thumbnailer(tmp_path / "thumbs")
     assert thumbs.ensure(str(video_dir), 1) is True
