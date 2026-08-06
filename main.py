@@ -20,6 +20,13 @@ def resolve_icon_path() -> Path:
 def main() -> int:
     config.APP_DIR.mkdir(parents=True, exist_ok=True)
     config.THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        try:
+            from services.startup_cleanup import cleanup_stale_mei
+
+            cleanup_stale_mei()
+        except Exception:
+            pass  # sweep is best-effort; never block startup on it
     try:
         crash_log = open(config.APP_DIR / "crash.log", "a", encoding="utf-8")
         faulthandler.enable(file=crash_log)
