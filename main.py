@@ -34,6 +34,9 @@ def main() -> int:
         pass  # backup is best-effort; never block startup on it
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
+    from ui.theme import app_qss
+
+    app.setStyleSheet(app_qss(app))
     icon_path = resolve_icon_path()
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))

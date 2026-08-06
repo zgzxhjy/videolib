@@ -92,6 +92,35 @@ def test_thumb_ready_null_decodes_drop_request_for_retry(qapp, app_env):
         w.close()
 
 
+def test_hover_tracks_any_column(qapp, app_env):
+    """Hovering over a NON-play column must still register the row: the whole
+    row lights up (RowHoverDelegate reads _hover_row), while the play-button
+    hover stays restricted to the play column."""
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        rect = w.table.visualRect(w.model.index(1, 1))
+        pos = QPointF(rect.center())
+        ev = QMouseEvent(
+            QEvent.Type.MouseMove,
+            pos,
+            QPointF(w.table.viewport().mapToGlobal(rect.center())),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        w.table.mouseMoveEvent(ev)
+        assert w.table._hover_row == 1, "hover over a data column must track the row"
+        assert w.table._delegate._hover_row == -1, "play-button hover stays column-bound"
+    finally:
+        w.close()
+
+
 def test_title_column_stretches(qapp, app_env):
     """Stretch/ResizeToContents must be honored after setModel (regression: was 100px)."""
     _mk_video(app_env, "超" * 40 + ".mp4", "D:/x/" + "超" * 40 + ".mp4")

@@ -26,6 +26,14 @@ from PyQt6.QtWidgets import (
 from domain.models import Video
 from domain.repository import Repository
 from services.thumbnailer import THUMB_HEIGHT, THUMB_SCALE, Thumbnailer
+from ui.theme import (
+    COLOR_BTN_HOVER_BG,
+    COLOR_BTN_HOVER_FG,
+    COLOR_BTN_IDLE_BG,
+    COLOR_BTN_IDLE_FG,
+    COLOR_BTN_PRESS_BG,
+    COLOR_BTN_PRESS_FG,
+)
 
 COL_THUMB = 0
 COL_PLAY = 6
@@ -69,6 +77,23 @@ class ThumbRunnable(QRunnable):
             self.cb.thumb_failed.emit(self.video_id)
 
 
+class RowHoverDelegate(QStyledItemDelegate):
+    """Paint the whole hovered row, not just the cell under the mouse.
+
+    QSS can only color `QTableView::item:hover`, i.e. the single cell under
+    the cursor. Injecting State_MouseOver on every cell of the tracked hover
+    row makes the stylesheet wash light up the entire row as one connected
+    band. The play column keeps its own button delegate and is not wired here.
+    """
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        view = self.parent()
+        hover = getattr(view, "_hover_row", -1)
+        if index.isValid() and index.row() == hover:
+            option.state |= QStyle.StateFlag.State_MouseOver
+
+
 class PlayButtonDelegate(QStyledItemDelegate):
     """Draws a clickable 'play' button inside the play column."""
 
@@ -93,11 +118,11 @@ class PlayButtonDelegate(QStyledItemDelegate):
         pressed = index.row() == self._press_row
         hovered = index.row() == self._hover_row
         if pressed:
-            bg, fg = QColor("#2458c9"), QColor("#ffffff")
+            bg, fg = QColor(COLOR_BTN_PRESS_BG), QColor(COLOR_BTN_PRESS_FG)
         elif hovered:
-            bg, fg = QColor("#2f6fed"), QColor("#ffffff")
+            bg, fg = QColor(COLOR_BTN_HOVER_BG), QColor(COLOR_BTN_HOVER_FG)
         else:
-            bg, fg = QColor("#e6ebf3"), QColor("#3a3f47")
+            bg, fg = QColor(COLOR_BTN_IDLE_BG), QColor(COLOR_BTN_IDLE_FG)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, 6, 6)
@@ -138,10 +163,16 @@ class PlayTableView(QTableView):
         return -1
 
     def mouseMoveEvent(self, event) -> None:
-        row = self._play_row_at(event.position().toPoint())
+        pos = event.position().toPoint()
+        idx = self.indexAt(pos)
+        row = idx.row() if idx.isValid() else -1
         if row != self._hover_row:
             self._hover_row = row
-            self._delegate._hover_row = row
+            self.viewport().update()
+        # play-button hover is tracked separately and only inside that column
+        btn_row = row if idx.isValid() and idx.column() == COL_PLAY else -1
+        if btn_row != self._delegate._hover_row:
+            self._delegate._hover_row = btn_row
             self.viewport().update()
         super().mouseMoveEvent(event)
 
