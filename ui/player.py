@@ -243,20 +243,14 @@ class PlayerWindow(QWidget):
     def _on_end(self) -> None:
         if self._closing:
             return
+        self._repo.record_play(self._video.id, 0.0)
         if self._loop_mode == 1:
-            # single loop: mark finished, replay the same video
-            self._repo.record_play(self._video.id, 0.0)
+            # single loop: replay the same video
             self._load(self._queue_index)
-        elif self._queue_index < len(self._queue) - 1:
-            # natural end: record the finished video, then roll on
-            self._repo.record_play(self._video.id, 0.0)
-            self._load(self._queue_index + 1)
         elif self._loop_mode == 2:
-            # all loop: wrap back to the first video
-            self._repo.record_play(self._video.id, 0.0)
-            self._load(0)
-        else:
-            self._finish(0.0)
+            # all loop: roll on to the next video, wrap past the end
+            self._load((self._queue_index + 1) % len(self._queue))
+        # loop off: stay put — mpv keep-open is already paused on the last frame
 
     def keyPressEvent(self, event) -> None:
         key = event.key()

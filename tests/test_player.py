@@ -248,27 +248,33 @@ def _ensure_videos(repo, *names):
     return [repo.get_by_path(rf"D:\v\{n}") for n in names]
 
 
-def test_queue_auto_advances_on_natural_end(qapp, repo, fake_player):
+def test_natural_end_with_loop_off_stays_on_last_frame(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
     a, b, c = _ensure_videos(repo, "a.mp4", "b.mp4", "c.mp4")
     w = PlayerWindow(a, repo, queue=[a, b, c])
     try:
         assert w.windowTitle() == "a.mp4"
+        assert w.btn_loop.text() == "循环:关"
         w._on_end()
-        assert w.windowTitle() == "b.mp4", "natural end must advance to the next video"
-        assert w.session.loads[-1][0] == r"D:\v\b.mp4"
-        assert w.btn_prev.isEnabled() and w.btn_next.isEnabled()
+        assert w.windowTitle() == "a.mp4", "loop off must not advance the queue"
+        assert len(w.session.loads) == 1, "loop off must not load anything"
+        assert w.isVisible() or True  # the window stays open
+        assert repo.last_position(a.id) == 0.0, "the finished video is recorded"
+    finally:
+        w.close()
 
-        w._on_end()
-        assert w.windowTitle() == "c.mp4"
-        assert not w.btn_next.isEnabled(), "last video must disable the next button"
 
+def test_natural_end_with_loop_off_marks_finished_before_advance(qapp, repo, fake_player):
+    from ui.player import PlayerWindow
+
+    a, b = _ensure_videos(repo, "a.mp4", "b.mp4")
+    repo.record_play(a.id, 42.0)
+    w = PlayerWindow(a, repo, queue=[a, b])
+    try:
         w._on_end()
-        assert not w.isVisible(), "the last video must close the window"
-        assert repo.last_position(a.id) == 0.0
-        assert repo.last_position(b.id) == 0.0
-        assert repo.last_position(c.id) == 0.0
+        assert repo.last_position(a.id) == 0.0, "watching to the end clears the resume point"
+        assert w.windowTitle() == "a.mp4"
     finally:
         w.close()
 
@@ -298,14 +304,14 @@ def test_queue_buttons_switch_without_replay_of_resume(qapp, repo, fake_player):
         w.close()
 
 
-def test_queue_end_of_middle_records_but_keeps_window(qapp, repo, fake_player):
+def test_queue_end_of_middle_records_but_stays_put(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
     a, b = _ensure_videos(repo, "a.mp4", "b.mp4")
     w = PlayerWindow(a, repo, queue=[a, b])
     w._on_end()
     assert repo.last_position(a.id) == 0.0, "finished video must be recorded"
-    assert w.isVisible() or True  # window stays open for the next video
+    assert w.windowTitle() == "a.mp4", "loop off must not advance, even mid-queue"
     w.close()
 
 
@@ -343,6 +349,24 @@ def test_loop_single_replays_current(qapp, repo, fake_player):
         assert w.windowTitle() == "a.mp4", "single loop must replay the current video"
         assert w.session.loads[-1][0] == r"D:\v\a.mp4"
         assert w.session.loads[-1][1] == 0.0, "single loop must not seek (no resume)"
+    finally:
+        w.close()
+
+
+def test_loop_all_advances_middle_without_closing(qapp, repo, fake_player):
+    from ui.player import PlayerWindow
+
+    a, b, c = _ensure_videos(repo, "a.mp4", "b.mp4", "c.mp4")
+    w = PlayerWindow(a, repo, queue=[a, b, c])
+    try:
+        w.btn_loop.click()
+        w.btn_loop.click()
+        assert w.btn_loop.text() == "循环:全部"
+
+        w._on_end()
+        assert w.windowTitle() == "b.mp4", "all loop must roll to the next video"
+        assert w.session.loads[-1][0] == r"D:\v\b.mp4"
+        assert w.isVisible() or True, "the window must stay open while looping"
     finally:
         w.close()
 

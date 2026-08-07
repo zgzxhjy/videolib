@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-07（会话 15：修复播放器 EOF 事件——循环/自动续播失效 + 下一集卡住，坑 #35）
+> 最后更新：2026-08-07（会话 16：循环:关 播完停在最后一帧——移除队列自然结束自动续播，全部循环改 modulo 推进回卷）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,7 +9,7 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，202 个用例全绿
+- 测试：pytest，204 个用例全绿
 - git：44 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）
@@ -138,7 +138,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 窗口/列宽记忆（会话 5）：c清Event 保存 window_geometry + column_widths（仅恢复 Interactive 列）+ 排序状态
 - [x] 排序（会话 5）：_natkey 自然键（v2 < v10）+ 表头点击 + 持久化；sort() 用 layoutChanged 重映射（reset 会递归崩）
 - [x] 断点标记（会话 5）：last_positions 批量查询 + 时长列 ⏵ 前缀（5s < pos < 90% 时长）+ tooltip 续播位置
-- [x] 播放队列（会话 5）：PlayerWindow(queue=...) + ⏮⎭ 按钮 + 自然结束自动续播（EndOfMedia 非最后一条则 record_play(0) 后 _load 下一条，_closing 防误触发）
+- [x] 播放队列（会话 5）：PlayerWindow(queue=...) + ⏮⎭ 按钮（循环:全部 播完续播回卷，_closing 防误触发；会话 16 起循环:关 播完停在最后一帧不再自动续播）
 - [x] 最近播放去重（会话 6）：play_history 每视频一行（video_id UNIQUE），record_play 改 UPDATE-then-INSERT（rowid 自增式 bump 保持同秒排序），老库自动去重迁移（保留每视频 MAX(id) 行=最新一次播放）；last_position/last_positions 简化（恒一行）
 - [x] 清空播放历史（会话 6）：工具栏「清空播放历史」按钮（紧挨「最近播放」）+ QMessageBox.question 二次确认；`Repository.clear_play_history()`（DELETE 全表，断点续播位置一并清除，不经 FTS）；`_refresh_all` 后 RECENT 视图即时变空、⏵ 标记消失；测试 88 用例
 - [x] 播放器增强（会话 7）：倍速按钮（0.5x/1x/1.25x/1.5x/2x 循环，`setPlaybackRate`，R 快捷键，切视频不重置）；全屏（F 键/双击视频区，eventFilter 实现，Esc 先退全屏再关闭）；音量记忆（settings.json "volume" 键，closeEvent 保存，默认 80）
