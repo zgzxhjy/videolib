@@ -69,6 +69,22 @@ def test_list_backups_newest_first(tmp_path):
     assert got == [names[2], names[1], names[0]], "newest first, non-matching ignored"
 
 
+def test_rotate_honours_backup_keep_setting(app_env, tmp_path):
+    """settings['backup_keep'] must override the config default in _rotate."""
+    import config
+
+    from services.backup import _rotate
+
+    config.save_setting("backup_keep", 2)
+    d = tmp_path / "backups"
+    d.mkdir()
+    for i in range(1, 6):
+        (d / f"videolib-2026010{i}-000000.db").write_bytes(b"x")
+    _rotate(d)
+    files = sorted(d.glob("videolib-*.db"))
+    assert len(files) == 2, "rotation must keep the configured count"
+
+
 def test_restore_backup_rewinds_db(backup_env, tmp_path):
     """restore_backup: snapshot first, drop WAL sidecars, wipe thumbs, and
     rewind the live DB to the chosen snapshot."""

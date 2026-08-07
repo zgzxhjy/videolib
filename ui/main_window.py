@@ -363,9 +363,16 @@ class MainWindow(QMainWindow):
         self._backup_menu.addAction("打开备份文件夹", self._open_backup_folder)
         self._backup_action = tb.addAction("备份与还原")
         self._backup_action.setMenu(self._backup_menu)
+        tb.addSeparator()
+        tb.addAction("设置", self._open_settings)
         self.addToolBar(tb)
         self._rebuild_history_menu()
         self._rebuild_favorites_menu()
+
+    def _open_settings(self) -> None:
+        from ui.dialogs.settings_dialog import SettingsDialog
+
+        SettingsDialog(self).exec()
 
     def _rebuild_favorites_menu(self) -> None:
         self._favorites_menu.clear()

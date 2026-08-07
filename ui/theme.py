@@ -235,8 +235,8 @@ def _palette_dark(app) -> bool:
     return color.lightness() < 128
 
 
-def app_qss(app) -> str:
-    """Stylesheet matching the running application's colour scheme.
+def resolve_scheme(app) -> str:
+    """Detect the effective colour scheme from the system.
 
     Detection order: Windows registry (authoritative where present), then
     Qt's colourScheme hint, then palette background lightness. The registry
@@ -246,13 +246,39 @@ def app_qss(app) -> str:
     if sys.platform == "win32":
         reg_dark = _detect_windows_dark()
         if reg_dark is not None:
-            return qss_for("dark" if reg_dark else "light")
+            return "dark" if reg_dark else "light"
 
     from PyQt6.QtCore import Qt
 
     cs = getattr(app.styleHints(), "colorScheme", None)
     if cs == Qt.ColorScheme.Dark:
-        return qss_for("dark")
+        return "dark"
     if cs == Qt.ColorScheme.Light:
-        return qss_for("light")
-    return qss_for("dark" if _palette_dark(app) else "light")
+        return "light"
+    return "dark" if _palette_dark(app) else "light"
+
+
+def _explicit_scheme() -> str | None:
+    """settings['theme'] override: 'light'/'dark' force a scheme, anything
+    else ('system' or absent) lets the system detection decide."""
+    import config
+
+    scheme = config.load_settings().get("theme")
+    return scheme if scheme in ("light", "dark") else None
+
+
+def app_qss(app, scheme: str | None = None) -> str:
+    """Stylesheet for the effective colour scheme.
+
+    `scheme` (explicit call) wins, then the settings override, then system
+    detection — so a manual choice in the settings dialog survives restarts
+    while 'system' keeps following the OS.
+    """
+    if scheme is None:
+        scheme = _explicit_scheme() or resolve_scheme(app)
+    return qss_for(scheme)
+
+
+def apply_theme(app) -> None:
+    """Re-apply the application stylesheet after a scheme change (runtime)."""
+    app.setStyleSheet(app_qss(app))

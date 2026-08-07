@@ -43,21 +43,21 @@ def test_qss_dark_uses_dark_view_background():
     assert "background-color: #ffffff" in qss_for("light")
 
 
-def test_app_qss_windows_registry_dark(monkeypatch):
+def test_app_qss_windows_registry_dark(monkeypatch, iso_settings):
     from ui.theme import app_qss, qss_for
 
     monkeypatch.setattr("ui.theme._detect_windows_dark", lambda: True)
     assert app_qss(None) == qss_for("dark")
 
 
-def test_app_qss_windows_registry_light(monkeypatch):
+def test_app_qss_windows_registry_light(monkeypatch, iso_settings):
     from ui.theme import app_qss, qss_for
 
     monkeypatch.setattr("ui.theme._detect_windows_dark", lambda: False)
     assert app_qss(None) == qss_for("light")
 
 
-def test_app_qss_honours_colour_scheme(qapp, monkeypatch):
+def test_app_qss_honours_colour_scheme(qapp, monkeypatch, iso_settings):
     """When the registry is silent, Qt's colour scheme hint decides."""
     from PyQt6.QtCore import Qt
 
@@ -75,7 +75,7 @@ def test_app_qss_honours_colour_scheme(qapp, monkeypatch):
     assert app_qss(FakeApp()) == qss_for("dark")
 
 
-def test_app_qss_unknown_scheme_falls_back_to_palette_brightness(qapp, monkeypatch):
+def test_app_qss_unknown_scheme_falls_back_to_palette_brightness(qapp, monkeypatch, iso_settings):
     """Unknown colourScheme (common on Windows) must not force light — the
     palette brightness decides instead."""
     from PyQt6.QtCore import Qt
@@ -99,3 +99,47 @@ def test_app_qss_unknown_scheme_falls_back_to_palette_brightness(qapp, monkeypat
             return pal
 
     assert app_qss(FakeApp()) == qss_for("dark")
+
+
+@pytest.fixture()
+def iso_settings(tmp_path, monkeypatch):
+    """Point config.SETTINGS_PATH at a fresh file (pitfall #24)."""
+    import config
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    return config
+
+
+def test_app_qss_explicit_scheme_overrides_system(monkeypatch):
+    """An explicit `scheme` argument must win over registry detection."""
+    from ui.theme import app_qss, qss_for
+
+    monkeypatch.setattr("ui.theme._detect_windows_dark", lambda: True)
+    assert app_qss(None, scheme="light") == qss_for("light")
+    assert app_qss(None, scheme="dark") == qss_for("dark")
+
+
+def test_app_qss_settings_override_wins_over_registry(iso_settings, monkeypatch):
+    """settings['theme']='dark' must force dark even when the registry says light."""
+    import config
+
+    from ui.theme import app_qss, qss_for
+
+    config.save_setting("theme", "dark")
+    monkeypatch.setattr("ui.theme._detect_windows_dark", lambda: False)
+    assert app_qss(None) == qss_for("dark")
+
+
+def test_app_qss_settings_system_falls_back_to_detection(iso_settings, monkeypatch):
+    """settings['theme']='system' must defer to the registry detection."""
+    import config
+
+    from ui.theme import app_qss, qss_for
+
+    config.save_setting("theme", "system")
+    monkeypatch.setattr("ui.theme._detect_windows_dark", lambda: True)
+    assert app_qss(None) == qss_for("dark")
+
+    config.save_setting("theme", "light")
+    monkeypatch.setattr("ui.theme._detect_windows_dark", lambda: True)
+    assert app_qss(None) == qss_for("light")

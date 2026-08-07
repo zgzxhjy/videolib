@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-07（会话 13：换机兼容性两处——窗口几何屏幕 clamp + 失效扫描根启动提示，坑 #33）
+> 最后更新：2026-08-07（会话 14：设置对话框 + 手动主题切换，坑 #34）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,7 +9,7 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，190 个用例全绿
+- 测试：pytest，198 个用例全绿
 - git：44 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）
@@ -29,6 +29,7 @@
 | 列表 | 虚拟滚动，行内「▶ 播放」按钮列（hover/press 反馈，**列宽随按钮文字自适应**），工具栏播放按钮，Enter/Space 快捷键，双击/右键播放；**长文件名 wordWrap 换行显示（不省略号），超长标题行高自动增长（TitleWrapDelegate sizeHint 按真实列宽算换行高度，行高 = max(96 缩略图, 换行文本)）** |
 | 批量操作 | 批量收藏、批量加/移分类 |
 | 清理所有目录 | 工具栏「清理所有目录」：两次确认 → 后台清空库内**全部**视频条目+缩略图（级联清播放历史/收藏关联/分类关联），**源文件不动、历史目录(scan_roots)与备份保留**，进度对话框可取消；`DeleteWorker(root=None)` 复用同一 worker（root=None=清空全部，跳过 remove_scan_root）；被删残留（root 记录已不在的孤儿条目）也能用此功能清掉 |
+| 设置 | 工具栏「设置」对话框：主题（跟随系统/浅色/深色，确定即时应用 + 重启记忆）、音量（与播放器共用的记忆值）、备份保留份数（`backup_keep`，默认 5，`_rotate` 动态读取） |
 | 其他 | 打开所在文件夹（explorer /select）、状态栏提示 |
 | 扫描进度 | 非模态 QProgressDialog（WindowModal）：枚举阶段忙碌态→元数据阶段 i/n 进度+当前文件名，可取消（保留已处理部分、跳过 stale 清理），扫描期间防重入 |
 
@@ -111,6 +112,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 31. **删除历史目录（删除并清除数据）曾是 UI 线程同步执行**：整库备份 + 删行 + 逐文件删缩略图，大目录冻结几十秒无反馈；中途退出会留下 FTS 索引残留（行已删但搜索仍显示幽灵条目）且无入口再清理。修复：**DeleteWorker(QThread) + 进度对话框（同扫描样式，可取消）**，scan_root 记录**最后一步才删**——root 记录是「可重试标记」，中断/取消后重新选择即可幂等清完。配套两个自愈：①启动时 `_heal_fts`（videos 与 videos_fts COUNT 不一致则重建，杜绝搜索幽灵条目）；②孤儿缩略图清理原有逻辑兜底。
 32. **PyQt6 信号有类型强校验**：`pyqtSignal(int, int, str)` 上 emit `Path`（不是 str）直接抛 TypeError，且若在 worker 的 `except Exception` 里被吞掉 → 任务「成功结束」但阶段没跑完，无任何迹象（实测 root_removed 变 False、进度条无更新）。铁律：**emit 前显式 `str()`**；worker 的 except 分支必须发独立 `error` 信号让 UI 可见，不能只用 message。
 33. **换机兼容性两个坑**：①`restoreGeometry` 会把别的分辨率/显示器布局下保存的几何原样恢复——整窗开在屏幕外且无把手拖回（player 的 `_fit_size` 有 clamp，主窗口没有）。修复：恢复后若 `frameGeometry` 与任何屏幕的 `availableGeometry` 无交集 → 移到所在屏中央。②扫描根是绝对路径（含盘符），换机/换盘后全部失效；之前只有 watcher 静默跳过。修复：启动 0ms 定时器检查 `_missing_scan_roots()`，非空弹非模态警告（`QMessageBox.open()` 而非静态 `warning()`——后者嵌套 exec 会卡住测试，且打开即被其他测试的 `processEvents` 触发）。测试注意：`register_scan` 会 normpath（正斜杠变反斜杠），断言必须 `os.path.normpath`。
+34. **主题切换测试不能对 session QApplication 调 `setStyleSheet`**：全量跑测试时前面的用例留下大量未销毁 widget（引用环/延迟 GC），`apply_theme` → `app.setStyleSheet` 会重刷整棵 widget 树，碰到半拆除对象 → access violation（单独跑 test_settings_dialog 不崩、全量必崩）。修复：测试 patch 掉 `apply_theme` 只验证「被调用 + 设置已写」，settings→qss 的映射交给 test_theme 纯函数覆盖。生产代码正常（应用内 widget 树健康）。另：主题三态 `system`/`light`/`dark`，`app_qss(app, scheme=None)` 显式参数 > 设置 > 系统检测；`backup_keep` 设置化后 `_rotate` 默认参数从常量改为读 settings（默认 5 不变）。
 
 
 ## 6. 验证手段（可复用）

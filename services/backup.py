@@ -76,7 +76,10 @@ def restore_backup(repo: Repository, backup_path: str | Path) -> Path:
 
 
 def _rotate(dir: Path, keep: int | None = None) -> None:
-    keep = keep or config.BACKUP_KEEP
+    """Prune old snapshots, keeping the newest `keep` (settings
+    'backup_keep' when not passed; the config default is 5)."""
+    if keep is None:
+        keep = int(config.load_settings().get("backup_keep", config.BACKUP_KEEP))
     files = sorted(
         (f for f in dir.glob("videolib-*.db") if _PATTERN.match(f.name)),
         key=lambda f: f.name,
