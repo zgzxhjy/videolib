@@ -33,6 +33,7 @@ from ui.category_tree import CategoryTree
 from ui.dialogs.pick_category import PickCategoryDialog
 from ui.dialogs.pick_favorite_list import PickFavoriteListDialog, normalize_favorite_name
 from ui.dialogs.pick_scan_root import PickScanRootDialog
+from ui.delete_worker import DeleteWorker
 from ui.player import PlayerWindow
 from ui.scan_worker import ScanWorker
 from ui.search_bar import SearchBar
@@ -114,6 +115,7 @@ class MainWindow(QMainWindow):
         self._players: list[PlayerWindow] = []
         self._watcher: WatcherThread | None = None
         self._scanner: ScanWorker | None = None
+        self._clear_worker: DeleteWorker | None = None
         self._cleanup_thread: _OrphanCleanupThread | None = None
         self._repair_thread: _MetadataRepairThread | None = None
         self.setWindowTitle(f"{config.APP_NAME} - 视频管理")
@@ -300,6 +302,7 @@ class MainWindow(QMainWindow):
         tb.addAction("查找重复", self._find_duplicates)
         tb.addAction("统计", self._show_stats)
         tb.addAction("清空播放历史", self._clear_play_history)
+        tb.addAction("清理所有目录", self._clear_all_directories)
         tb.addSeparator()
         self._backup_menu = QMenu(self)
         self._backup_menu.addAction("立即备份", self._backup_now)
@@ -384,6 +387,75 @@ class MainWindow(QMainWindow):
         self._repo.clear_play_history()
         self._refresh_all()
         self.statusBar().showMessage("已清空播放历史")
+
+    def _clear_all_directories(self) -> None:
+        total = self._repo.count()
+        if total == 0:
+            QMessageBox.information(self, "清理所有目录", "库中没有任何视频条目。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "清理所有目录",
+            f"确定清理所有目录？\n将清空库中的 {total} 条视频记录及其缩略图。\n"
+            f"磁盘源文件不受影响；历史目录与数据库备份保留，可通过「备份与还原」恢复。",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        reply = QMessageBox.question(
+            self,
+            "清理所有目录",
+            "再次确认：全部视频条目将被永久清除（备份除外），且无法撤销！",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        dialog = QProgressDialog(
+            f"正在清理全部 {total} 条视频条目...", "取消清理", 0, 0, self
+        )
+        dialog.setWindowTitle("清理进度")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(self._cancel_clear_all)
+        dialog.show()
+
+        worker = DeleteWorker(None, self._repo, self)
+        worker.progress.connect(
+            lambda done, total_, fp: self._on_delete_progress(dialog, done, total_, fp)
+        )
+        worker.error.connect(
+            lambda msg: QMessageBox.warning(self, "清理所有目录", f"清理出错:\n{msg}")
+        )
+        worker.done.connect(lambda deleted, _: self._on_clear_done(dialog, deleted))
+        self._clear_worker = worker
+        worker.start()
+
+    def _cancel_clear_all(self) -> None:
+        if self._clear_worker is not None:
+            self._clear_worker.cancel()
+
+    def _on_delete_progress(
+        self, dialog: QProgressDialog, done: int, total: int, fp: str
+    ) -> None:
+        dialog.setRange(0, total)
+        dialog.setValue(done)
+        dialog.setLabelText(f"正在清理缩略图 {done}/{total}:\n{os.path.basename(fp)}")
+
+    def _on_clear_done(self, dialog: QProgressDialog, deleted: int) -> None:
+        canceled = (
+            self._clear_worker is not None and self._clear_worker._cancel_flag
+        )
+        dialog.close()
+        dialog.deleteLater()
+        self._clear_worker = None
+        self._rebuild_favorites_menu()
+        self.model.show(self._view, **self._view_ctx())
+        if canceled:
+            self.statusBar().showMessage("已取消清理，剩余条目可稍后重新清理")
+        else:
+            self.statusBar().showMessage(
+                f"已清空 {deleted} 个视频条目（备份已保存）"
+            )
 
     def _delete_scan_roots(self) -> None:
         dialog = PickScanRootDialog(self._repo, parent=self)

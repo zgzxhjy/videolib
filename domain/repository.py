@@ -581,6 +581,27 @@ class Repository:
         self._finish_videos_write()
         return ids
 
+    def clear_all_videos(self) -> list[int]:
+        """Delete every video row, returning the deleted video ids.
+
+        Play history / favorites / category links cascade via foreign keys.
+        Scan roots and the category tree are kept (a root's categories are
+        scoped to it, but an empty library must stay re-scanable from its
+        history). Callers must also remove the thumbnails for the returned
+        ids.
+        """
+        ids = self._write_videos(lambda: self._clear_all_under())
+        self._finish_videos_write()
+        return ids
+
+    def _clear_all_under(self) -> list[int]:
+        ids = [
+            r["id"] for r in self._conn.execute("SELECT id FROM videos").fetchall()
+        ]
+        if ids:
+            self._conn.execute("DELETE FROM videos")
+        return ids
+
     def _remove_categories_under(self, nc_root: str) -> None:
         rows = self._conn.execute("SELECT id, root FROM categories").fetchall()
         doomed = [

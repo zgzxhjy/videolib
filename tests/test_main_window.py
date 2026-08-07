@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -47,6 +48,15 @@ def _make_window(app_env):
     w.resize(1100, 700)
     w.show()
     return w
+
+
+def _wait_for(predicate, timeout=10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_regenerate_keeps_cached_pixmap_until_ready(qapp, app_env):
@@ -369,6 +379,86 @@ def test_clear_play_history_refused_keeps_data(qapp, app_env, monkeypatch):
         qapp.processEvents()
         assert app_env.last_position(a.id) == 42.0
         assert len(app_env.recent_plays(limit=10)) == 1
+    finally:
+        w.close()
+
+
+def test_clear_all_directories_refused_keeps_everything(qapp, app_env, monkeypatch):
+    """A declined first confirm must not start a clear worker."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    app_env.register_scan("D:/x")
+    w = _make_window(app_env)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+    )
+    try:
+        qapp.processEvents()
+        w._clear_all_directories()
+        qapp.processEvents()
+        assert app_env.count() == 1
+        assert app_env.get_scan_roots() == [os.path.normpath("D:/x")]
+        assert w._clear_worker is None, "no worker may start on refusal"
+    finally:
+        w.close()
+
+
+def test_clear_all_directories_second_confirm_refused(qapp, app_env, monkeypatch):
+    """The double confirm must both be Yes before anything is deleted."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    w = _make_window(app_env)
+    answers = iter([QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No])
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: next(answers)),
+    )
+    try:
+        qapp.processEvents()
+        w._clear_all_directories()
+        qapp.processEvents()
+        assert app_env.count() == 1
+        assert w._clear_worker is None
+    finally:
+        w.close()
+
+
+def test_clear_all_directories_wipes_library_keeps_history(qapp, app_env, monkeypatch):
+    """Double Yes clears every row + thumb; scan roots and backup survive."""
+    import config
+    from PyQt6.QtWidgets import QMessageBox
+
+    from services.thumbnailer import Thumbnailer
+
+    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    b = app_env.get_by_path("D:/x/b.mp4")
+    app_env.register_scan("D:/x")
+    for v in (a, b):
+        Thumbnailer(config.THUMBS_DIR).path_for(v.id).write_bytes(b"x")
+    w = _make_window(app_env)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    try:
+        qapp.processEvents()
+        w._clear_all_directories()
+        assert _wait_for(
+            lambda: w._clear_worker is not None and w._clear_worker.isFinished()
+        ), "clear worker did not finish"
+        for _ in range(30):
+            qapp.processEvents()
+        assert app_env.count() == 0
+        assert app_env.get_scan_roots() == [os.path.normpath("D:/x")], "history must survive clear-all"
+        assert not Thumbnailer(config.THUMBS_DIR).path_for(a.id).exists()
+        assert not Thumbnailer(config.THUMBS_DIR).path_for(b.id).exists()
+        assert "已清空" in w.statusBar().currentMessage()
+        assert w._clear_worker is None, "worker ref must be released after done"
     finally:
         w.close()
 

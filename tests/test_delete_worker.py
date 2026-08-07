@@ -140,6 +140,54 @@ def test_delete_worker_reports_progress(qapp, tmp_path, repo):
     assert progress == [(1, 3), (2, 3), (3, 3)]
 
 
+def test_delete_worker_clear_all_mode(qapp, tmp_path, repo):
+    root, other, files, keep, thumbs_dir, videos = _setup(tmp_path, repo)
+    events: list[tuple[int, bool]] = []
+    worker = DeleteWorker(None, repo, thumbs_dir=thumbs_dir)
+    worker.done.connect(lambda deleted, removed: events.append((deleted, removed)))
+    worker.start()
+    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    _drain(qapp)
+    assert events == [(4, False)], "clear-all deletes every row, never a scan root"
+    assert repo.count() == 0
+    assert str(root) in repo.get_scan_roots(), "history must survive clear-all"
+    assert str(other) in repo.get_scan_roots()
+    for v in videos:
+        assert not _thumb(thumbs_dir, v.id).exists(), "thumb must die with its row"
+
+
+def test_clear_all_videos_keeps_roots_and_cascades(tmp_path):
+    """clear_all_videos drops rows + FTS + cascaded links, keeps scan roots
+    and the category tree."""
+    db = tmp_path / "db.sqlite"
+    r = Repository(db)
+    f1 = _make_test_video(tmp_path / "a.mp4")
+    f2 = _make_test_video(tmp_path / "b.mp4")
+    r.upsert_videos([build_video(str(f1)), build_video(str(f2))])
+    r.register_scan(str(tmp_path))
+    v1 = r.get_by_path(str(f1))
+    r.record_play(v1.id, 5.0)
+    fl = r.create_favorite_list("收藏夹_一")
+    r.add_favorite(v1.id, fl.id)
+    cat = r.add_category("分类甲", root=str(tmp_path))
+    r.assign_category(v1.id, cat.id)
+
+    ids = r.clear_all_videos()
+    assert len(ids) == 2
+    assert r.count() == 0
+    assert r.get_scan_roots() == [str(tmp_path)], "history must survive"
+    assert r.recent_plays() == [], "play history must cascade away"
+    assert r.count_favorites(fl.id) == 0, "favorite links must cascade away"
+    assert r.videos_in_category(cat.id) == [], "category links must cascade away"
+    with r._lock:
+        fts = r._conn.execute("SELECT COUNT(*) AS c FROM videos_fts").fetchone()["c"]
+        cats = r._conn.execute("SELECT COUNT(*) AS c FROM categories").fetchone()["c"]
+    assert fts == 0, "FTS must be rebuilt to empty"
+    assert cats == 1, "category tree is kept"
+    assert r.search("a", limit=10) == []
+    r.close()
+
+
 def test_delete_for_progress_and_cancel(tmp_path):
     thumbs_dir = tmp_path / "thumbs"
     ids = [10, 20, 30]
