@@ -9,7 +9,7 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，204 个用例全绿
+- 测试：pytest，206 个用例全绿
 - git：44 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）

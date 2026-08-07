@@ -78,7 +78,7 @@ class PlayerWindow(QWidget):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.sliderPressed.connect(lambda: self._set_seeking(True))
         self.slider.sliderReleased.connect(self._seek_to_slider)
-        self.slider.sliderMoved.connect(lambda v: self.time_label.setText(f"{_fmt(v)} / {_fmt(self.session.duration() // 1000)}"))
+        self.slider.sliderMoved.connect(lambda v: self.time_label.setText(f"{_fmt(v // 1000)} / {_fmt(self.session.duration() // 1000)}"))
 
         self.vol = QSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 100)

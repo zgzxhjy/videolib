@@ -163,6 +163,30 @@ def test_esc_closes_and_records_position(qapp, repo, fake_player):
     assert repo.last_position(a.id) == 60.0
 
 
+def test_slider_drag_shows_ms_position_in_seconds(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
+    try:
+        w.slider.sliderMoved.emit(42_000)
+        assert w.time_label.text() == "00:42 / 01:40", \
+            "slider values are ms, the drag label must format them as seconds"
+    finally:
+        w.close()
+
+
+def test_slider_release_seeks_to_slider_value(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
+    try:
+        w.slider.setMaximum(w.session.duration())  # as _on_position does
+        w.slider.setValue(30_000)
+        w.slider.sliderReleased.emit()
+        assert w.session.seeks and w.session.seeks[-1] == 30_000, \
+            "release must seek to the slider position in ms"
+    finally:
+        w.close()
+
+
 def test_play_button_syncs_with_session_state(qapp, repo, fake_player):
     _ensure_video(repo)
     w = _window(repo)
