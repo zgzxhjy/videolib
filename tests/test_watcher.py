@@ -1,22 +1,15 @@
-import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PyQt6.QtWidgets import QApplication
 from domain.repository import Repository
 from services.watcher import WatcherThread
-from tests.test_scan import _make_test_video
+from tests.helpers import make_test_video, wait_for
 
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
+DEBOUNCE = 0.2
+POLL = 0.05
 
 
 @pytest.fixture()
@@ -28,28 +21,26 @@ def watch_env(tmp_path):
     repo.close()
 
 
-def _wait_for(condition, timeout=15.0, interval=0.3):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if condition():
-            return True
-        time.sleep(interval)
-    return False
+def _start_thread(repo, root, **kw):
+    thread = WatcherThread(
+        root, repo, debounce=kw.get("debounce", DEBOUNCE), poll=kw.get("poll", POLL)
+    )
+    thread.start()
+    assert thread.ready.wait(5), "observer did not become ready"
+    return thread
 
 
 def test_watcher_adds_and_removes(watch_env):
     repo, root = watch_env
-    thread = WatcherThread(str(root), repo)
-    thread.start()
-    assert thread.ready.wait(5), "observer did not become ready"
+    thread = _start_thread(repo, str(root))
     try:
         new_file = root / "new_video.mp4"
-        _make_test_video(new_file)
-        assert _wait_for(lambda: repo.get_by_path(str(new_file)) is not None)
+        make_test_video(new_file)
+        assert wait_for(lambda: repo.get_by_path(str(new_file)) is not None)
         assert repo.count() == 1
 
         new_file.unlink()
-        assert _wait_for(lambda: repo.get_by_path(str(new_file)) is None)
+        assert wait_for(lambda: repo.get_by_path(str(new_file)) is None)
         assert repo.count() == 0
     finally:
         thread.stop()
@@ -58,12 +49,10 @@ def test_watcher_adds_and_removes(watch_env):
 
 def test_watcher_ignores_non_video(watch_env):
     repo, root = watch_env
-    thread = WatcherThread(str(root), repo)
-    thread.start()
-    assert thread.ready.wait(5), "observer did not become ready"
+    thread = _start_thread(repo, str(root))
     try:
         (root / "notes.txt").write_text("hello")
-        time.sleep(3.5)
+        time.sleep(1.0)
         assert repo.count() == 0
     finally:
         thread.stop()
@@ -76,16 +65,14 @@ def test_watcher_watches_multiple_roots(tmp_path):
     root_b = tmp_path / "watch_b"
     root_a.mkdir()
     root_b.mkdir()
-    thread = WatcherThread([str(root_a), str(root_b)], repo)
-    thread.start()
-    assert thread.ready.wait(5), "observer did not become ready"
+    thread = _start_thread(repo, [str(root_a), str(root_b)])
     try:
         fa = root_a / "a.mp4"
         fb = root_b / "b.mp4"
-        _make_test_video(fa)
-        _make_test_video(fb)
-        assert _wait_for(lambda: repo.get_by_path(str(fa)) is not None)
-        assert _wait_for(lambda: repo.get_by_path(str(fb)) is not None)
+        make_test_video(fa)
+        make_test_video(fb)
+        assert wait_for(lambda: repo.get_by_path(str(fa)) is not None)
+        assert wait_for(lambda: repo.get_by_path(str(fb)) is not None)
         assert repo.count() == 2
     finally:
         thread.stop()
@@ -99,14 +86,16 @@ def test_watcher_skips_missing_root_keeps_others(qapp, tmp_path):
     root = tmp_path / "watch"
     root.mkdir()
     msgs: list[str] = []
-    thread = WatcherThread([str(missing), str(root)], repo)
+    thread = WatcherThread(
+        [str(missing), str(root)], repo, debounce=DEBOUNCE, poll=POLL
+    )
     thread.message.connect(msgs.append)
     thread.start()
     assert thread.ready.wait(5), "thread must still become ready"
     try:
         f = root / "a.mp4"
-        _make_test_video(f)
-        assert _wait_for(lambda: repo.get_by_path(str(f)) is not None), (
+        make_test_video(f)
+        assert wait_for(lambda: repo.get_by_path(str(f)) is not None), (
             "the valid root must keep working"
         )
         for _ in range(10):
@@ -170,7 +159,7 @@ def test_flush_indexes_pending_changes_directly(watch_env):
     repo, root = watch_env
     thread = WatcherThread(str(root), repo)
     f = root / "v.mp4"
-    _make_test_video(f)
+    make_test_video(f)
     thread._added[str(f)] = time.time()
     thread._flush()
     assert repo.get_by_path(str(f)) is not None

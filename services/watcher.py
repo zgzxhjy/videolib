@@ -61,10 +61,19 @@ class WatcherThread(QThread):
     message = pyqtSignal(str)
     changed = pyqtSignal()
 
-    def __init__(self, roots: str | list[str], repo: Repository, parent=None):
+    def __init__(
+        self,
+        roots: str | list[str],
+        repo: Repository,
+        parent=None,
+        debounce: float = 2.0,
+        poll: float = 0.5,
+    ):
         super().__init__(parent)
         self._roots = [roots] if isinstance(roots, str) else list(roots)
         self._repo = repo
+        self._debounce = debounce
+        self._poll = poll
         self._added: dict[str, float] = {}
         self._removed: set[str] = set()
         self._changed: set[str] = set()
@@ -99,13 +108,13 @@ class WatcherThread(QThread):
             while not self._stop_flag:
                 now = time.time()
                 if self._added or self._removed or self._changed:
-                    if now - self._flush_ts >= 2.0:
+                    if now - self._flush_ts >= self._debounce:
                         try:
                             self._flush()
                         except Exception as exc:
                             self.message.emit(f"增量同步出错: {exc}")
                         self._flush_ts = now
-                time.sleep(0.5)
+                time.sleep(self._poll)
         except Exception as exc:
             self.message.emit(f"监控线程异常: {exc}")
         finally:
