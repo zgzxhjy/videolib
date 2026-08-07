@@ -13,6 +13,7 @@ import ctypes.wintypes as wt
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -28,6 +29,8 @@ def _mpv_log_path() -> str:
 
 
 def _default_mpv_exe() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "vendor", "mpv", "mpv.exe")
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(here, "vendor", "mpv", "mpv.exe")
 

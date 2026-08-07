@@ -23,7 +23,7 @@
 | 元数据 | PyAV 提取时长/分辨率/编码，全部入库 |
 | 搜索 | FTS5 全文 + LIKE 兜底（支持中文），300ms 防抖搜索栏 |
 | 分类 | 层级树（右键增删改、禁止移入自身子树），**分类按扫描目录隔离**（`categories.root` 列，切换目录树即切换）；遗留旧分类启动时一次性收养到 watch_root；跨目录分配被拦截 |
-| 播放 | QMediaPlayer 播放器，断点续播 + 播放历史（最近播放视图） |
+| 播放 | mpv.exe 子进程内核（named pipe IPC + child hwnd d3d11 渲染，`services/mpv_session.py` + `ui/video_widget.py`），断点续播（loadfile start=）+ 播放历史（最近播放视图），倍速/音量/静音/循环/全屏/队列不变 |
 | 收藏 | 命名收藏夹（`收藏夹_***`，自动补前缀）：工具栏「收藏夹」下拉切换/新建/**删除（菜单底部「删除收藏夹...」→ 删除模式对话框，确认后记录清空、视频文件不受影响）**；右键「添加到收藏夹...」选夹（可内联新建，重名提示）、「从收藏夹移除...」只列含该视频的夹；旧单表收藏自动迁移到「收藏夹_默认」 |
 | 缩略图 | 纯 PyAV 生成（170x96，16:9 裁切填满），懒生成 + 4 线程池，孤儿清理，失败写日志 |
 | 列表 | 虚拟滚动，行内「▶ 播放」按钮列（hover/press 反馈，**列宽随按钮文字自适应**），工具栏播放按钮，Enter/Space 快捷键，双击/右键播放；**长文件名 wordWrap 换行显示（不省略号），超长标题行高自动增长（TitleWrapDelegate sizeHint 按真实列宽算换行高度，行高 = max(96 缩略图, 换行文本)）** |
@@ -50,7 +50,8 @@ videolib/
 ├── ui/
 │   ├── main_window.py       # 布局/工具栏/右键菜单/快捷键/扫描与监控编排
 │   ├── video_list.py        # VideoTableModel + PlayTableView + PlayButtonDelegate + ThumbRunnable
-│   ├── player.py            # 播放窗口（断点续播、closeEvent 记录位置）
+│   ├── player.py            # 播放窗口（MpvSession 会话，断点续播、closeEvent 记录位置）
+│   ├── video_widget.py      # 视频容器（Win32 child hwnd 承载 mpv d3d11 渲染）
 │   ├── category_tree.py     # 分类树
 │   ├── scan_worker.py       # ScanWorker(QThread)
 │   ├── search_bar.py        # 防抖搜索
@@ -100,6 +101,9 @@ build.bat                               # 打包 → dist\VideoLib.exe
 22. **Qt 枚举驼峰拼写错误 → 事件过滤器内 AttributeError → qFatal**：`QEvent.Type.MouseButtonDBlClick` 不存在（正确拼写 `MouseButtonDblClick`），且发生在 eventFilter 回调内（同 slot）→ 0xC0000409 无输出。铁律：**事件过滤器/槽内新增代码里的 Qt 枚举属性名，先 `dir(QEvent.Type)` 验证拼写**。
 23. **Python 3.14 pathlib 的 `str(WindowsPath)` 返回反斜杠**：`str(Path('C:/x'))` → `'C:\\x'`（3.14 pathlib 重构）；而 Qt `QUrl.fromLocalFile().toLocalFile()` 往返**保留正斜杠**。测试断言跨这两者时必须显式统一分隔符（`replace('\\','/')`），不能直接比较。
 24. **测试必须隔离 SETTINGS_PATH**：播放器音量记忆后 `closeEvent` 写真实 `~/.videolib/settings.json`（player 测试曾把用户音量改成 75）。铁律：**任何会写 settings 的新代码，相关测试 fixture 必须 monkeypatch `config.SETTINGS_PATH` 到 tmp**（对照 main_window 的 app_env）。
+25. **ctypes WNDPROC cast 后对象被 GC → CreateWindowExW 回调悬垂 → access violation（0xC0000409）**：`wc.lpfnWndProc = ctypes.cast(WNDPROC(wndproc), c_void_p)` 只拷贝裸指针，函数返回后 WNDPROC 对象无引用即回收。修复：**wndproc 提为模块级函数 + WNDPROC 实例模块级持有 + 窗口类只注册一次**。症状：构造 PlayerWindow 时崩、独立 MpvSession 冒烟却偶尔不崩（GC 时序敏感）。
+26. **named pipe 客户端必须轮询 connect**：`WaitNamedPipeW` 在 **pipe 不存在时立即返回失败（不等待）**，而 mpv 冷启动（d3d11 init）需 1-3 秒才建 pipe → 一次调用必然 FileNotFoundError。修复：循环 WaitNamedPipeW(250)/CreateFileW + 150ms 退避至 deadline。
+27. **同步 ReadFile 阻塞会锁死同句柄另一线程的 WriteFile**：读线程先阻塞 `ReadFile`（等 mpv 事件）后，主线程 `WriteFile` 永远不返回（mpv 日志停在 "Client connected"，命令根本没送达）。修复：**读侧永不阻塞**——`PeekNamedPipe` 探测有数据才 ReadFile，无数据 sleep 50ms 轮询；ReadFile 一次读入的多行 JSON 要按行拆分逐条消费（time-pos 事件 100ms 一个会堆积）。
 
 ## 6. 验证手段（可复用）
 
@@ -108,7 +112,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 
 ## 7. 待办 / 后续方向
 
-- [ ] 播放内核备选：QMediaPlayer 格式覆盖有限，`ui/player.py` 已预留替换点，可换 mpv（python-mpv）
+- [x] 播放内核迁移 mpv（会话 8/9）：QMediaPlayer 换 mpv.exe 子进程（`vendor/mpv/mpv.exe` 117MB 静态单文件，named pipe IPC，Win32 child hwnd 承载 d3d11 渲染；Qt top-level hwnd 直连会 0xC0000409，必须自建 child）；打包已 `--add-data` 收集 mpv.exe
 - [ ] HiDPI：缩略图 2x 生成（340x192）+ QIcon dpr，当前高分屏略糊
 - [ ] 中文搜索优化：拼音首字母索引或 jieba 分词
 - [x] 扫描进度 UI：QProgressDialog + 取消（会话 3），ScanWorker 增加 `progress(done,total,fp)` / `done(bool)` / `cancel()`
