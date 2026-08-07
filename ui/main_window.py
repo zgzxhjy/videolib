@@ -11,12 +11,14 @@ from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHeaderView,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QSplitter,
     QToolBar,
     QVBoxLayout,
@@ -144,7 +146,7 @@ class MainWindow(QMainWindow):
         self.model.modelReset.connect(self._update_count_label)
         self.model.show(VIEW_ALL)
         self.table.selectionModel().selectionChanged.connect(
-            lambda _sel, _desel: self.play_action.setEnabled(bool(self._selected_videos()))
+            lambda _sel, _desel: self._sync_selection_actions()
         )
         self._setup_shortcuts()
         self._restore_ui_state()
@@ -336,25 +338,32 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         tb = QToolBar("主工具栏")
         tb.setMovable(False)
+        self.toolbar = tb
         self.play_action = tb.addAction("▶ 播放选中", self._play_selected)
         self.play_action.setEnabled(False)
+        self.fav_action = tb.addAction(
+            "☆ 收藏选中", lambda: self._add_to_favorite(self._selected_videos())
+        )
+        self.fav_action.setEnabled(False)
         tb.addSeparator()
         tb.addAction("扫描目录", self._pick_and_scan)
         self._history_menu = QMenu(self)
-        self._history_action = tb.addAction("历史目录")
+        self._history_action = tb.addAction("已扫描目录")
         self._history_action.setMenu(self._history_menu)
-        tb.addAction("所有目录", lambda: self._set_view(VIEW_ALL))
-        tb.addAction("当前目录", lambda: self._set_view(VIEW_CURRENT))
+        tb.addAction("全部视频", lambda: self._set_view(VIEW_ALL))
+        tb.addAction("上次扫描目录", lambda: self._set_view(VIEW_CURRENT))
         tb.addAction("最近播放", lambda: self._set_view(VIEW_RECENT))
         self._favorites_menu = QMenu(self)
         self._favorites_action = tb.addAction("收藏夹")
         self._favorites_action.setMenu(self._favorites_menu)
         tb.addSeparator()
-        tb.addAction("刷新", self._refresh_all)
-        tb.addAction("查找重复", self._find_duplicates)
-        tb.addAction("统计", self._show_stats)
-        tb.addAction("清空播放历史", self._clear_play_history)
-        tb.addAction("清理所有目录", self._clear_all_directories)
+        self._tools_menu = QMenu(self)
+        self._tools_menu.addAction("刷新", self._refresh_all)
+        self._tools_menu.addAction("查找重复", self._find_duplicates)
+        self._tools_menu.addAction("统计", self._show_stats)
+        self._tools_menu.addAction("清除所有视频数据", self._clear_all_directories)
+        self._tools_action = tb.addAction("管理工具")
+        self._tools_action.setMenu(self._tools_menu)
         tb.addSeparator()
         self._backup_menu = QMenu(self)
         self._backup_menu.addAction("立即备份", self._backup_now)
@@ -432,7 +441,7 @@ class MainWindow(QMainWindow):
             self._history_menu.addAction(r, lambda r=r: self._start_scan(r))
         if roots:
             self._history_menu.addSeparator()
-            self._history_menu.addAction("删除历史记录...", self._delete_scan_roots)
+            self._history_menu.addAction("移除扫描数据...", self._delete_scan_roots)
 
     def _clear_play_history(self) -> None:
         reply = QMessageBox.question(
@@ -450,19 +459,19 @@ class MainWindow(QMainWindow):
     def _clear_all_directories(self) -> None:
         total = self._repo.count()
         if total == 0:
-            QMessageBox.information(self, "清理所有目录", "库中没有任何视频条目。")
+            QMessageBox.information(self, "清除所有视频数据", "库中没有任何视频条目。")
             return
         reply = QMessageBox.question(
             self,
-            "清理所有目录",
-            f"确定清理所有目录？\n将清空库中的 {total} 条视频记录及其缩略图。\n"
-            f"磁盘源文件不受影响；历史目录与数据库备份保留，可通过「备份与还原」恢复。",
+            "清除所有视频数据",
+            f"确定清除所有视频数据？\n将清空库中的 {total} 条视频记录及其缩略图。\n"
+            f"磁盘源文件不受影响；已扫描目录与数据库备份保留，可通过「备份与还原」恢复。",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
         reply = QMessageBox.question(
             self,
-            "清理所有目录",
+            "清除所有视频数据",
             "再次确认：全部视频条目将被永久清除（备份除外），且无法撤销！",
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -483,7 +492,7 @@ class MainWindow(QMainWindow):
             lambda done, total_, fp: self._on_delete_progress(dialog, done, total_, fp)
         )
         worker.error.connect(
-            lambda msg: QMessageBox.warning(self, "清理所有目录", f"清理出错:\n{msg}")
+            lambda msg: QMessageBox.warning(self, "清除所有视频数据", f"清理出错:\n{msg}")
         )
         worker.done.connect(lambda deleted, _: self._on_clear_done(dialog, deleted))
         self._clear_worker = worker
@@ -533,7 +542,7 @@ class MainWindow(QMainWindow):
             self._save_watch_roots(watched)
             self._start_watcher(watched)
         self._refresh_all()
-        self.statusBar().showMessage(f"已删除 {len(deleted)} 个历史目录")
+        self.statusBar().showMessage(f"已移除 {len(deleted)} 个扫描目录")
 
     def _build_body(self) -> None:
         self.tree = CategoryTree(self._repo)
@@ -541,6 +550,9 @@ class MainWindow(QMainWindow):
 
         self.search = SearchBar()
         self.search.search_submitted.connect(self._on_search)
+        self.btn_clear_history = QPushButton("清除播放历史")
+        self.btn_clear_history.clicked.connect(self._clear_play_history)
+        self.btn_clear_history.setVisible(False)
 
         self.table = PlayTableView()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -557,7 +569,10 @@ class MainWindow(QMainWindow):
         right = QWidget()
         layout = QVBoxLayout(right)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.search)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(self.btn_clear_history)
+        layout.addLayout(search_row)
         layout.addWidget(self.table)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -577,6 +592,11 @@ class MainWindow(QMainWindow):
     def _video_at(self, index) -> Video | None:
         v = index.data(Qt.ItemDataRole.UserRole)
         return v if isinstance(v, Video) else None
+
+    def _sync_selection_actions(self) -> None:
+        enabled = bool(self._selected_videos())
+        self.play_action.setEnabled(enabled)
+        self.fav_action.setEnabled(enabled)
 
     def _selected_videos(self) -> list[Video]:
         vids = []
@@ -600,6 +620,7 @@ class MainWindow(QMainWindow):
         if view == VIEW_ALL:
             self.tree.reload("")
         self.model.show(view, **self._view_ctx())
+        self.btn_clear_history.setVisible(view == VIEW_RECENT)
 
     def _refresh_all(self) -> None:
         self.tree.reload()

@@ -340,6 +340,103 @@ def test_clear_play_history_refused_keeps_data(qapp, app_env, monkeypatch):
         w.close()
 
 
+def test_toolbar_actions_renamed_and_grouped(qapp, app_env):
+    """The 6-item toolbar rework: new favorite button, renamed views,
+    tools grouped under 管理工具, no stale actions."""
+    mk_video(app_env, "D:/x/a.mp4")
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        texts = {a.text() for a in w.toolbar.actions()}
+        assert "☆ 收藏选中" in texts
+        assert "已扫描目录" in texts and "历史目录" not in texts
+        assert "全部视频" in texts and "所有目录" not in texts
+        assert "上次扫描目录" in texts and "当前目录" not in texts
+        assert "管理工具" in texts
+        for stale in ("清空播放历史", "清理所有目录", "刷新", "查找重复", "统计"):
+            assert stale not in texts, f"stale toolbar action: {stale}"
+
+        tool_texts = {a.text() for a in w._tools_menu.actions()}
+        assert {"刷新", "查找重复", "统计", "清除所有视频数据"} <= tool_texts
+    finally:
+        w.close()
+
+
+def test_favorite_selected_button_enables_and_batches(qapp, app_env, monkeypatch):
+    """收藏选中 must be disabled without selection, enabled with one, and
+    hand the selected videos to _add_to_favorite when triggered."""
+    mk_video(app_env, "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/b.mp4")
+    w = _make_window(app_env)
+
+    calls: list[list] = []
+    monkeypatch.setattr(w, "_add_to_favorite", lambda videos: calls.append(videos))
+    try:
+        qapp.processEvents()
+        assert not w.fav_action.isEnabled(), "disabled without selection"
+
+        w.table.selectRow(0)
+        qapp.processEvents()
+        assert w.play_action.isEnabled()
+        assert w.fav_action.isEnabled(), "enabled with selection"
+
+        w.fav_action.trigger()
+        assert len(calls) == 1 and len(calls[0]) == 1
+
+        w.table.selectRow(1)
+        qapp.processEvents()
+        w.fav_action.trigger()
+        assert len(calls) == 2 and len(calls[1]) == 1
+
+        w.table.selectAll()
+        qapp.processEvents()
+        w.fav_action.trigger()
+        assert len(calls) == 3 and len(calls[2]) == 2, "multi-select must batch"
+
+        w.table.clearSelection()
+        qapp.processEvents()
+        assert not w.fav_action.isEnabled(), "disabled after clearing selection"
+    finally:
+        w.close()
+
+
+def test_clear_history_button_visible_only_in_recent_view(qapp, app_env, monkeypatch):
+    """The clear-history control lives in the recent view only."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from ui.video_list import ViewKind
+
+    mk_video(app_env, "D:/x/a.mp4")
+    a = app_env.get_by_path("D:/x/a.mp4")
+    app_env.record_play(a.id, 42.0)
+
+    w = _make_window(app_env)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    try:
+        qapp.processEvents()
+        assert not w.btn_clear_history.isVisible(), "hidden outside recent view"
+
+        w._set_view(ViewKind.RECENT)
+        qapp.processEvents()
+        assert w.btn_clear_history.isVisible(), "visible in recent view"
+        assert w.model.rowCount() == 1
+
+        w.btn_clear_history.click()
+        qapp.processEvents()
+        assert app_env.recent_plays(limit=10) == []
+        assert app_env.last_position(a.id) == 0.0
+        assert w.model.rowCount() == 0
+
+        w._set_view(ViewKind.ALL)
+        qapp.processEvents()
+        assert not w.btn_clear_history.isVisible(), "hidden again outside recent view"
+    finally:
+        w.close()
+
+
 def test_clear_all_directories_refused_keeps_everything(qapp, app_env, monkeypatch):
     """A declined first confirm must not start a clear worker."""
     from PyQt6.QtWidgets import QMessageBox

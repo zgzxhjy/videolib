@@ -31,7 +31,7 @@ class PickScanRootDialog(QDialog):
         self._repo = repo
         self.deleted_roots: list[str] = []
         self._worker: DeleteWorker | None = None
-        self.setWindowTitle("删除历史目录")
+        self.setWindowTitle("移除扫描数据")
         self.setMinimumWidth(420)
 
         self.list = QListWidget()
@@ -60,14 +60,14 @@ class PickScanRootDialog(QDialog):
         self.list.clear()
         roots = self._repo.get_scan_roots()
         if not roots:
-            self.list.addItem("(暂无历史目录)")
+            self.list.addItem("(暂无已扫描目录)")
         for r in roots:
             self.list.addItem(r)
 
     def _selected_root(self) -> str | None:
         item = self.list.currentItem()
         if item is None:
-            QMessageBox.warning(self, "删除历史目录", "请先选择一个目录")
+            QMessageBox.warning(self, "移除扫描数据", "请先选择一个目录")
             return None
         return item.text()
 
@@ -83,8 +83,8 @@ class PickScanRootDialog(QDialog):
             return
         reply = QMessageBox.question(
             self,
-            "删除历史目录",
-            f"确定仅移除「{root}」的历史记录？\n该目录下的视频仍保留在库中。",
+            "移除扫描数据",
+            f"确定仅移除「{root}」的扫描记录？\n该目录下的视频仍保留在库中。",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -98,7 +98,7 @@ class PickScanRootDialog(QDialog):
             return
         reply = QMessageBox.question(
             self,
-            "删除历史目录",
+            "移除扫描数据",
             f"确定删除「{root}」及其全部数据？\n"
             f"该目录下所有视频条目、收藏和分类关联都将被清除，且无法恢复！",
         )
@@ -122,7 +122,7 @@ class PickScanRootDialog(QDialog):
             lambda done, total, fp: self._on_delete_progress(dialog, done, total, fp)
         )
         worker.error.connect(
-            lambda msg: QMessageBox.warning(self, "删除历史目录", f"删除出错:\n{msg}")
+            lambda msg: QMessageBox.warning(self, "移除扫描数据", f"删除出错:\n{msg}")
         )
         worker.done.connect(
             lambda deleted, root_removed: self._on_delete_done(
