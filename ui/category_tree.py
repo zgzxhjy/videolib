@@ -15,6 +15,8 @@ from ui.video_list import MIME_VIDEO_IDS
 
 _ROOT_ROLE = int(Qt.ItemDataRole.UserRole) + 1  # holds the scan root of a category item
 
+ALL_CATEGORIES_ROOT = "__all__"  # global category scope (the 全部视频 parent)
+
 
 class CategoryTree(QTreeWidget):
     """Hierarchical category sidebar for one scan root. Emits categorySelected(None) for root view."""
@@ -58,8 +60,12 @@ class CategoryTree(QTreeWidget):
             # single scan root: its categories hang directly off the root item
             self._add_children(root_item, by_parent, None, self._root)
         else:
-            # all-dirs view: group categories under one node per scan root
+            # all-dirs view: global categories ('' legacy or __all__) hang
+            # directly off the root item; everything else groups by scan root
             for group_root in sorted({r for r, _p in by_parent}):
+                if group_root in ("", ALL_CATEGORIES_ROOT):
+                    self._add_children(root_item, by_parent, None, group_root)
+                    continue
                 group = QTreeWidgetItem([os.path.basename(os.path.normpath(group_root)) or group_root])
                 group.setData(0, Qt.ItemDataRole.UserRole, group_root)
                 group.setData(0, _ROOT_ROLE, group_root)
@@ -106,7 +112,7 @@ class CategoryTree(QTreeWidget):
         return item, data if isinstance(data, int) else None
 
     def _show_menu(self, pos) -> None:
-        item = self.currentItem()
+        item = self.itemAt(pos)
         menu = QMenu(self)
         act_add = menu.addAction("新建子分类")
         act_rename = menu.addAction("重命名")
@@ -131,9 +137,9 @@ class CategoryTree(QTreeWidget):
         name, ok = QInputDialog.getText(self, "新建分类", "分类名称:")
         if not ok or not name.strip():
             return
-        root = self._root
+        root = self._root or ALL_CATEGORIES_ROOT
         if parent_item is not None:
-            root = parent_item.data(0, _ROOT_ROLE) or self._root
+            root = parent_item.data(0, _ROOT_ROLE) or root
         self._repo.add_category(name.strip(), parent_id, root=root)
         self.reload()
 

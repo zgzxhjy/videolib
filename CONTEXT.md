@@ -12,7 +12,7 @@
 | 扫描根 | scan root | 用户索引过的目录（`scan_roots` 表）；stale 清理只限当前 root 内 | `Repository.scan_roots` |
 | 增量监控 | watcher | watchdog 对最后扫描目录的 2s 防抖增量同步，事件批 → apply_sync | `services/watcher.py` |
 | 视图 | ViewKind | 四视图：当前目录/所有目录/收藏夹/最近播放；视图→查询的映射在模型中 | `ui/video_list.py` |
-| 分类 | category | 按扫描根隔离的层级标签树；跨 root 分配被拦截 | `Repository.categories` |
+| 分类 | category | 按扫描根隔离的层级标签树；跨 root 分配被拦截（右键批量分配只限当前 root）；**全局分类**：root=`__all__` 哨兵（全部视频父目录），仅全部视频视图显示，可拖拽跨 root 分配 | `Repository.categories` |
 | 收藏夹 | favorite list | 命名收藏夹（`收藏夹_***` 前缀），视频可入多个夹 | `Repository.favorite_lists` |
 | 缩略图 | thumbnail | `{id}.jpg`，id 是视频行主键；**删视频必须删缩略图**（id 复用会显示旧图） | `services/thumbnailer.py` |
 | 断点续播 | resume position | `play_history` 末条 position；<5s 的关闭不覆盖断点 | `ui/player.py` |

@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-07（会话 18：工具栏整改——「收藏选中」批量收藏、已扫描目录/全部视频/上次扫描目录改名、「清除播放历史」移入最近播放界面、「管理工具」下拉收纳 刷新/查找重复/统计/清除所有视频数据）
+> 最后更新：2026-08-07（会话 19：新增「全部视频」全局父目录——右键根节点/空白处新建全局分类（root=`__all__` 哨兵），直接挂「全部视频」下，可拖拽收任意扫描目录视频，adopt 收养只动遗留 root=''）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,8 +9,8 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，211 个用例全绿
-- git：45 个提交，分支 master
+- 测试：pytest，218 个用例全绿
+- git：46 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）
 
@@ -22,7 +22,7 @@
 | 增量扫描 | `diff_scan` 按 size+mtime 比对，未变化文件跳过 PyAV 探测（重扫已记忆目录秒级完成）；video_id 稳定 → 缩略图复用不重生成；**空目录（无视频文件）不落库：不注册 scan_roots/不动现有数据，跳回上一目录并弹窗提示** |
 | 元数据 | PyAV 提取时长/分辨率/编码，全部入库 |
 | 搜索 | FTS5 全文 + LIKE 兜底（支持中文），300ms 防抖搜索栏 |
-| 分类 | 层级树（右键增删改、禁止移入自身子树），**分类按扫描目录隔离**（`categories.root` 列，切换目录树即切换）；遗留旧分类启动时一次性收养到 watch_root；跨目录分配被拦截 |
+| 分类 | 层级树（右键增删改、禁止移入自身子树），**分类按扫描目录隔离**（`categories.root` 列，切换目录树即切换）；遗留旧分类启动时一次性收养到 watch_root；跨目录分配被拦截；**全局分类（会话 19）**：root=`__all__` 哨兵 =「全部视频」父目录（右键根节点/空白处新建），仅全部视频视图显示（直接挂根节点下，无分组外壳），拖拽可收任意扫描目录视频，右键批量分配仍限当前目录；`adopt_legacy_categories` 只收养 root='' 不触碰 `__all__`；右键菜单改用 `itemAt(pos)` 定位（空白处=全局/当前作用域） |
 | 播放 | mpv.exe 子进程内核（named pipe IPC + child hwnd d3d11 渲染，`services/mpv_session.py` + `ui/video_widget.py`），断点续播（loadfile start=）+ 播放历史（最近播放视图），倍速/音量/静音/循环/全屏/队列不变 |
 | 收藏 | 命名收藏夹（`收藏夹_***`，自动补前缀）：工具栏「收藏夹」下拉切换/新建/**删除（菜单底部「删除收藏夹...」→ 删除模式对话框，确认后记录清空、视频文件不受影响）**；右键「添加到收藏夹...」选夹（可内联新建，重名提示）、「从收藏夹移除...」只列含该视频的夹；旧单表收藏自动迁移到「收藏夹_默认」 |
 | 缩略图 | 纯 PyAV 生成（170x96，16:9 裁切填满），懒生成 + 4 线程池，孤儿清理，失败写日志；**取样模式可配（会话 17）**：settings["thumb_mode"]——random=10%-90% 随机（默认）/ fixed=固定前 5%（`_seek_fraction` 纯函数，只影响新生成） |
@@ -142,6 +142,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 - [x] 最近播放去重（会话 6）：play_history 每视频一行（video_id UNIQUE），record_play 改 UPDATE-then-INSERT（rowid 自增式 bump 保持同秒排序），老库自动去重迁移（保留每视频 MAX(id) 行=最新一次播放）；last_position/last_positions 简化（恒一行）
 - [x] 清空播放历史（会话 6）：`Repository.clear_play_history()`（DELETE 全表，断点续播位置一并清除，不经 FTS）；`_refresh_all` 后 RECENT 视图即时变空、⏵ 标记消失；测试 88 用例；会话 18 起入口改为**最近播放界面内「清除播放历史」按钮**（仅 RECENT 视图可见）
 - [x] 工具栏整改（会话 18）：新增「☆ 收藏选中」（多选批量收藏，复用 `_add_to_favorite`，随选择启用/禁用）；「历史目录→已扫描目录」（菜单项「删除历史记录...→移除扫描数据...」，对话框同步改名）；「所有目录→全部视频」「当前目录→上次扫描目录」；「刷新/查找重复/统计/清理所有目录」收进新「管理工具」下拉，「清理所有目录→清除所有视频数据」；测试 211 用例
+- [x] 全部视频全局父目录（会话 19）：`CategoryTree.ALL_CATEGORIES_ROOT="__all__"` 哨兵；all 视图根节点/空白处右键新建全局分类（直接挂「全部视频」下），分组/分类节点仍绑定各自 root；修复 root='' 空标签分组渲染与 `currentItem()` 残留定位；全局分类拖拽可收任意 root 视频；adopt 只收养遗留 root=''；测试 218 用例
 - [x] 播放器增强（会话 7）：倍速按钮（0.5x/1x/1.25x/1.5x/2x 循环，`setPlaybackRate`，R 快捷键，切视频不重置）；全屏（F 键/双击视频区，eventFilter 实现，Esc 先退全屏再关闭）；音量记忆（settings.json "volume" 键，closeEvent 保存，默认 80）
 - [x] 右键菜单（会话 7）：「标记为已看完」（`clear_play_position` UPDATE position=0 保留最近条目）、「复制路径」「复制文件名」（多选换行分隔，QApplication.clipboard）
 - [x] 库统计面板（会话 7）：`Repository.stats()`（总数/总时长/总大小/各 root 计数/分类计数）+ 工具栏「统计」按钮 + QMessageBox.information

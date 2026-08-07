@@ -449,6 +449,17 @@ def test_adopt_legacy_categories(repo):
     assert repo.adopt_legacy_categories(r"D:\b") == 0
 
 
+def test_adopt_legacy_categories_skips_global_scope(repo):
+    from ui.category_tree import ALL_CATEGORIES_ROOT
+
+    repo.add_category("旧")
+    repo.add_category("全局", root=ALL_CATEGORIES_ROOT)
+    assert repo.adopt_legacy_categories(r"D:\a") == 1
+    roots = {c.name: c.root for c in repo.get_categories(None)}
+    assert roots["旧"] == r"D:\a", "legacy root='' must still be adopted"
+    assert roots["全局"] == ALL_CATEGORIES_ROOT, "global categories must survive adoption"
+
+
 def test_migration_adds_columns(tmp_path):
     """A DB created before multi-root support must be upgraded in place."""
     import sqlite3

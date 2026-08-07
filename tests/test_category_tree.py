@@ -101,3 +101,127 @@ def test_group_node_has_no_category_id_for_menu_and_drop(qapp, repo):
     ))
     item, cid = tree._selected_category()
     assert item is not None and cid is None
+
+
+@pytest.fixture()
+def _named_input(monkeypatch):
+    """New-category dialogs answer with a fixed name."""
+    from ui.category_tree import QInputDialog
+
+    monkeypatch.setattr(
+        QInputDialog, "getText",
+        staticmethod(lambda *a, **k: ("新分类", True)),
+    )
+    return QInputDialog
+
+
+def test_all_view_root_item_insert_creates_global_category(qapp, repo, _named_input):
+    """Right-clicking the 全部视频 root item must create a global category."""
+    from ui.category_tree import ALL_CATEGORIES_ROOT, CategoryTree
+
+    tree = CategoryTree(repo)
+    tree.reload("")
+    tree._add_child(tree.topLevelItem(0), None)
+
+    cats = repo.get_categories(None)
+    assert len(cats) == 1 and cats[0].root == ALL_CATEGORIES_ROOT
+
+    items = _tree_items(tree)
+    assert items[0][0] == "全部视频"
+    assert items[1][0] == "新分类"
+    assert items[1][3] == "全部视频", "global category hangs directly under the root item"
+
+
+def test_all_view_blank_insert_creates_global_category(qapp, repo, _named_input):
+    """A blank-area insert in the all view is the global scope too."""
+    from ui.category_tree import ALL_CATEGORIES_ROOT, CategoryTree
+
+    tree = CategoryTree(repo)
+    tree.reload("")
+    tree._add_child(None, None)
+
+    cats = repo.get_categories(None)
+    assert len(cats) == 1 and cats[0].root == ALL_CATEGORIES_ROOT
+
+
+def test_single_root_view_root_item_insert_binds_current_root(qapp, repo, _named_input):
+    """Single-root view: root item/blank inserts stay in that root."""
+    from ui.category_tree import CategoryTree
+
+    tree = CategoryTree(repo)
+    tree.reload(r"D:\a")
+    tree._add_child(tree.topLevelItem(0), None)
+    tree._add_child(None, None)
+
+    roots = [c.root for c in repo.get_categories(None)]
+    assert roots == [r"D:\a", r"D:\a"]
+
+
+def test_group_and_category_inserts_still_bind_their_root(qapp, repo, _named_input):
+    """Group/category nodes keep binding to their own scan root (regression)."""
+    from ui.category_tree import CategoryTree
+
+    tree = _fill(repo)
+    tree.reload("")
+    group = next(
+        i for i in _iter_items(tree)
+        if isinstance(i.data(0, Qt.ItemDataRole.UserRole), str)
+    )
+    tree._add_child(group, None)
+    category = next(
+        i for i in _iter_items(tree)
+        if isinstance(i.data(0, Qt.ItemDataRole.UserRole), int)
+    )
+    tree._add_child(category, category.data(0, Qt.ItemDataRole.UserRole))
+
+    new_roots = [c.root for c in repo.get_categories(None) if c.name == "新分类"]
+    assert new_roots == [r"D:\a", r"D:\a"]
+
+
+def test_legacy_empty_root_categories_render_under_all_root_item(qapp, repo):
+    """Legacy root='' categories must not become an empty-label group."""
+    from ui.category_tree import CategoryTree
+
+    repo.add_category("遗留", root="")
+    tree = CategoryTree(repo)
+    tree.reload("")
+
+    items = _tree_items(tree)
+    assert items[1][0] == "遗留"
+    assert items[1][3] == "全部视频"
+    assert all(not (isinstance(r, str) and t == "") for t, r, _rr, _p in items)
+
+
+def test_drop_on_global_category_accepts_cross_root_videos(qapp, repo):
+    """Dragging rows from any scan root onto a global category must assign."""
+    from PyQt6.QtCore import QMimeData, QPointF, Qt
+    from PyQt6.QtGui import QDropEvent
+
+    from tests.helpers import mk_video
+    from ui.category_tree import ALL_CATEGORIES_ROOT, CategoryTree
+    from ui.video_list import MIME_VIDEO_IDS
+
+    repo.register_scan(r"D:\a")
+    repo.register_scan(r"D:\b")
+    mk_video(repo, "D:/a/one.mp4")
+    mk_video(repo, "D:/b/two.mp4")
+    a = repo.get_by_path("D:/a/one.mp4")
+    b = repo.get_by_path("D:/b/two.mp4")
+    cat = repo.add_category("跨目录", root=ALL_CATEGORIES_ROOT)
+
+    tree = CategoryTree(repo)
+    tree.reload("")
+    cat_item = next(
+        i for i in _iter_items(tree)
+        if i.data(0, Qt.ItemDataRole.UserRole) == cat.id
+    )
+    tree.itemAt = lambda _pos: cat_item
+
+    md = QMimeData()
+    md.setData(MIME_VIDEO_IDS, f"{a.id},{b.id}".encode())
+    event = QDropEvent(
+        QPointF(10, 10), Qt.DropAction.CopyAction, md,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    tree.dropEvent(event)
+    assert {v.id for v in repo.videos_in_category(cat.id)} == {a.id, b.id}
