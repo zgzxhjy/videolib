@@ -1,49 +1,16 @@
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from domain.repository import Repository
 from services.library import Library
 from services.metadata import build_video
 from services.scanner import diff_scan, scan_directory
 from services.thumbnailer import Thumbnailer
-
-
-def _make_test_video(path: Path, seconds: int = 1) -> Path:
-    """Generate a tiny real video file using PyAV (mpeg4, 64x48)."""
-    import av
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(path), "w") as container:
-        stream = container.add_stream("mpeg4", rate=10)
-        stream.width = 64
-        stream.height = 48
-        stream.pix_fmt = "yuv420p"
-        for i in range(seconds * 10):
-            frame = av.VideoFrame(64, 48, "yuv420p")
-            for plane in frame.planes:
-                plane.update(bytes([i % 256]) * plane.buffer_size)
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return path
+from tests.helpers import make_test_video
 
 
 def _make_test_bin_video(path: Path) -> Path:
     """A real video container carrying the ambiguous .bin name (content
     sniffing must look past the extension)."""
-    return _make_test_video(path.with_suffix(".mp4")).rename(path)
-
-
-@pytest.fixture()
-def repo(tmp_path):
-    r = Repository(tmp_path / "db.sqlite")
-    yield r
-    r.close()
+    return make_test_video(path.with_suffix(".mp4")).rename(path)
 
 
 def _thumb(thumbs_dir: Path, video_id: int) -> Path:
@@ -53,7 +20,7 @@ def _thumb(thumbs_dir: Path, video_id: int) -> Path:
 def test_apply_sync_probes_new_files_and_reports_counts(tmp_path, repo):
     root = tmp_path / "root"
     root.mkdir()
-    f = _make_test_video(root / "a.mp4")
+    f = make_test_video(root / "a.mp4")
     lib = Library(repo, tmp_path / "thumbs")
     progress: list[tuple] = []
 
@@ -70,9 +37,9 @@ def test_apply_sync_probes_new_files_and_reports_counts(tmp_path, repo):
 def test_apply_sync_skips_probe_when_canceled(tmp_path, repo):
     root = tmp_path / "root"
     root.mkdir()
-    stale_file = _make_test_video(root / "old.mp4")
+    stale_file = make_test_video(root / "old.mp4")
     repo.upsert_videos([build_video(str(stale_file))])
-    new_file = _make_test_video(root / "new.mp4")
+    new_file = make_test_video(root / "new.mp4")
 
     lib = Library(repo, tmp_path / "thumbs")
     result = lib.apply_sync(
@@ -88,7 +55,7 @@ def test_apply_sync_skips_probe_when_canceled(tmp_path, repo):
 def test_apply_sync_cancel_midway_keeps_partial_batch(tmp_path, repo):
     root = tmp_path / "root"
     root.mkdir()
-    files = [_make_test_video(root / f"v{i}.mp4") for i in range(3)]
+    files = [make_test_video(root / f"v{i}.mp4") for i in range(3)]
     lib = Library(repo, tmp_path / "thumbs")
     calls = {"n": 0}
 
@@ -106,7 +73,7 @@ def test_apply_sync_cancel_midway_keeps_partial_batch(tmp_path, repo):
 def test_apply_sync_removals_delete_rows_and_thumbs(tmp_path, repo):
     root = tmp_path / "root"
     root.mkdir()
-    f = _make_test_video(root / "a.mp4")
+    f = make_test_video(root / "a.mp4")
     repo.upsert_videos([build_video(str(f))])
     v = repo.get_by_path(str(f))
     thumbs_dir = tmp_path / "thumbs"
@@ -123,7 +90,7 @@ def test_apply_sync_removals_delete_rows_and_thumbs(tmp_path, repo):
 def test_remove_paths_deletes_rows_and_thumbs(tmp_path, repo):
     root = tmp_path / "root"
     root.mkdir()
-    f = _make_test_video(root / "a.mp4")
+    f = make_test_video(root / "a.mp4")
     repo.upsert_videos([build_video(str(f))])
     v = repo.get_by_path(str(f))
     thumbs_dir = tmp_path / "thumbs"
@@ -145,8 +112,8 @@ def test_remove_root_deletes_rows_and_thumbs_under_root(tmp_path, repo):
     other = tmp_path / "other"
     root.mkdir()
     other.mkdir()
-    fa = _make_test_video(root / "a.mp4")
-    fb = _make_test_video(other / "b.mp4")
+    fa = make_test_video(root / "a.mp4")
+    fb = make_test_video(other / "b.mp4")
     repo.upsert_videos([build_video(str(fa)), build_video(str(fb))])
     va = repo.get_by_path(str(fa))
     vb = repo.get_by_path(str(fb))
@@ -166,10 +133,10 @@ def test_end_to_end_scan_through_library(tmp_path, repo):
     """The full scan pipeline (enumerate + diff + sync) as the CLI runs it."""
     root = tmp_path / "root"
     root.mkdir()
-    stale_file = _make_test_video(root / "gone" / "old.mp4")
+    stale_file = make_test_video(root / "gone" / "old.mp4")
     repo.upsert_videos([build_video(str(stale_file))])
     stale_file.unlink()
-    files = [_make_test_video(root / f"v{i}.mp4") for i in range(2)]
+    files = [make_test_video(root / f"v{i}.mp4") for i in range(2)]
 
     need_probe, stale = diff_scan(
         scan_directory(str(root)), repo.existing_under(str(root))

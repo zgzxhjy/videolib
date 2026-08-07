@@ -1,19 +1,7 @@
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domain.models import Category, Video
 from domain.repository import Repository
-
-
-@pytest.fixture()
-def repo(tmp_path):
-    r = Repository(tmp_path / "test.db")
-    yield r
-    r.close()
 
 
 def _mk(filename: str, filepath: str, **kw) -> Video:

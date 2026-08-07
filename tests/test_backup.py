@@ -1,29 +1,9 @@
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from domain.models import Video
 from domain.repository import Repository
-
-
-@pytest.fixture()
-def repo(tmp_path):
-    r = Repository(tmp_path / "db.sqlite")
-    yield r
-    r.close()
-
-
-@pytest.fixture(autouse=True)
-def _backup_dir(monkeypatch, tmp_path):
-    import config
-
-    monkeypatch.setattr(config, "BACKUPS_DIR", tmp_path / "backups")
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "videolib.db")
-    monkeypatch.setattr(config, "THUMBS_DIR", tmp_path / "thumbs")
-    monkeypatch.setattr(config, "APP_DIR", tmp_path)
 
 
 def _today():
@@ -32,12 +12,12 @@ def _today():
     return datetime.now().strftime("%Y%m%d")
 
 
-def test_backup_db_writes_snapshot_and_rotates(repo, tmp_path):
+def test_backup_db_writes_snapshot_and_rotates(app_env, tmp_path):
     from services.backup import _rotate, backup_db
 
-    repo.upsert_videos([Video(filename="a.mp4", filepath=r"D:\v\a.mp4")])
+    app_env.upsert_videos([Video(filename="a.mp4", filepath=r"D:\v\a.mp4")])
 
-    first = backup_db(repo, force=True)
+    first = backup_db(app_env, force=True)
     assert first is not None, "force=True must always write"
 
     # rotation: only the newest BACKUP_KEEP snapshots survive
@@ -59,12 +39,12 @@ def test_backup_db_writes_snapshot_and_rotates(repo, tmp_path):
         conn.close()
 
 
-def test_backup_db_daily_startup_skips_same_day(repo, tmp_path):
+def test_backup_db_daily_startup_skips_same_day(app_env, tmp_path):
     from services.backup import backup_db
 
-    first = backup_db(repo)
+    first = backup_db(app_env)
     assert first is not None
-    second = backup_db(repo)
+    second = backup_db(app_env)
     assert second is None, "a plain startup backup happens once per day"
 
     files = list(tmp_path.glob("backups/videolib-*.db"))
@@ -89,7 +69,7 @@ def test_list_backups_newest_first(tmp_path):
     assert got == [names[2], names[1], names[0]], "newest first, non-matching ignored"
 
 
-def test_restore_backup_rewinds_db(tmp_path):
+def test_restore_backup_rewinds_db(backup_env, tmp_path):
     """restore_backup: snapshot first, drop WAL sidecars, wipe thumbs, and
     rewind the live DB to the chosen snapshot."""
     import config
@@ -134,14 +114,14 @@ def test_restore_backup_rewinds_db(tmp_path):
         reopened.close()
 
 
-def test_library_destructive_ops_snapshot_first(repo, tmp_path):
+def test_library_destructive_ops_snapshot_first(app_env, tmp_path):
     """remove_root/remove_paths must leave a recoverable snapshot behind."""
     import config
 
     from services.library import Library
 
-    repo.upsert_videos([Video(filename="a.mp4", filepath=r"D:\v\a.mp4")])
-    lib = Library(repo, tmp_path / "thumbs")
+    app_env.upsert_videos([Video(filename="a.mp4", filepath=r"D:\v\a.mp4")])
+    lib = Library(app_env, tmp_path / "thumbs")
     lib.remove_root(r"D:\v")
 
     files = list(config.BACKUPS_DIR.glob("videolib-*.db"))

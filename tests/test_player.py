@@ -1,29 +1,6 @@
-import os
-import sys
-from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import pytest
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture()
-def player_env(tmp_path):
-    from domain.repository import Repository
-
-    repo = Repository(tmp_path / "db.sqlite")
-    yield repo
-    repo.close()
 
 
 class FakeSession(QObject):
@@ -96,18 +73,18 @@ def fake_player(monkeypatch, tmp_path):
     monkeypatch.setattr(player_mod, "MpvSession", FakeSession)
 
 
-def _ensure_video(player_env):
+def _ensure_video(repo):
     from domain.models import Video
 
-    player_env.upsert_videos([Video(filename="a.mp4", filepath=r"D:\v\a.mp4")])
-    return player_env.get_by_path(r"D:\v\a.mp4")
+    repo.upsert_videos([Video(filename="a.mp4", filepath=r"D:\v\a.mp4")])
+    return repo.get_by_path(r"D:\v\a.mp4")
 
 
-def _window(player_env, duration=None):
+def _window(repo, duration=None):
     """Build a player for the DB-backed video (never an id=0 dataclass)."""
     from domain.models import Video
 
-    v = player_env.get_by_path(r"D:\v\a.mp4")
+    v = repo.get_by_path(r"D:\v\a.mp4")
     assert v is not None, "call _ensure_video first"
     if duration is not None:
         v = Video(
@@ -124,13 +101,13 @@ def _window(player_env, duration=None):
         )
     from ui.player import PlayerWindow
 
-    return PlayerWindow(v, player_env)
+    return PlayerWindow(v, repo)
 
 
-def test_resume_sec_passed_on_load(qapp, player_env, fake_player):
-    a = _ensure_video(player_env)
-    player_env.record_play(a.id, 42.0)
-    w = _window(player_env, duration=100.0)
+def test_resume_sec_passed_on_load(qapp, repo, fake_player):
+    a = _ensure_video(repo)
+    repo.record_play(a.id, 42.0)
+    w = _window(repo, duration=100.0)
     try:
         path, resume = w.session.loads[-1]
         assert path == r"D:\v\a.mp4"
@@ -139,22 +116,22 @@ def test_resume_sec_passed_on_load(qapp, player_env, fake_player):
         w.close()
 
 
-def test_no_resume_below_threshold_or_near_end(qapp, player_env, fake_player):
-    a = _ensure_video(player_env)
-    player_env.record_play(a.id, 3.0)
-    w = _window(player_env, duration=100.0)
+def test_no_resume_below_threshold_or_near_end(qapp, repo, fake_player):
+    a = _ensure_video(repo)
+    repo.record_play(a.id, 3.0)
+    w = _window(repo, duration=100.0)
     assert w.session.loads[-1][1] == 0.0, "positions under 5s must not resume"
     w.close()
 
-    player_env.record_play(a.id, 95.0)
-    w2 = _window(player_env, duration=100.0)
+    repo.record_play(a.id, 95.0)
+    w2 = _window(repo, duration=100.0)
     assert w2.session.loads[-1][1] == 0.0, "positions beyond 90% of duration must not resume"
     w2.close()
 
 
-def test_arrow_keys_control_progress_and_volume(qapp, player_env, fake_player):
-    _ensure_video(player_env)
-    w = _window(player_env)
+def test_arrow_keys_control_progress_and_volume(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
     try:
         w.show()
         QTest.keyClick(w, Qt.Key.Key_Right)
@@ -175,19 +152,19 @@ def test_arrow_keys_control_progress_and_volume(qapp, player_env, fake_player):
         w.close()
 
 
-def test_esc_closes_and_records_position(qapp, player_env, fake_player):
-    a = _ensure_video(player_env)
-    w = _window(player_env)
+def test_esc_closes_and_records_position(qapp, repo, fake_player):
+    a = _ensure_video(repo)
+    w = _window(repo)
     w.show()
     w.session.seek(60_000)
     QTest.keyClick(w, Qt.Key.Key_Escape)
     assert not w.isVisible(), "Esc must close the player"
-    assert player_env.last_position(a.id) == 60.0
+    assert repo.last_position(a.id) == 60.0
 
 
-def test_rate_button_cycles_and_r_key(qapp, player_env, fake_player):
-    _ensure_video(player_env)
-    w = _window(player_env)
+def test_rate_button_cycles_and_r_key(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
     try:
         assert w.btn_rate.text() == "倍速 1x"
         w.btn_rate.click()
@@ -205,9 +182,9 @@ def test_rate_button_cycles_and_r_key(qapp, player_env, fake_player):
         w.close()
 
 
-def test_fullscreen_f_double_click_and_esc(qapp, player_env, fake_player):
-    _ensure_video(player_env)
-    w = _window(player_env)
+def test_fullscreen_f_double_click_and_esc(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
     w.show()
     try:
         QTest.keyClick(w, Qt.Key.Key_F)
@@ -229,16 +206,16 @@ def test_fullscreen_f_double_click_and_esc(qapp, player_env, fake_player):
         w.close()
 
 
-def test_volume_memory_across_runs(qapp, player_env, fake_player):
+def test_volume_memory_across_runs(qapp, repo, fake_player):
     import config
 
-    _ensure_video(player_env)
+    _ensure_video(repo)
 
-    w1 = _window(player_env)
+    w1 = _window(repo)
     w1.vol.setValue(55)
     w1.close()
 
-    w2 = _window(player_env)
+    w2 = _window(repo)
     try:
         assert w2.vol.value() == 55, "volume must be restored from settings"
         assert config.load_settings().get("volume") == 55
@@ -246,20 +223,20 @@ def test_volume_memory_across_runs(qapp, player_env, fake_player):
         w2.close()
 
 
-def _ensure_videos(player_env, *names):
+def _ensure_videos(repo, *names):
     from domain.models import Video
 
-    player_env.upsert_videos(
+    repo.upsert_videos(
         [Video(filename=n, filepath=rf"D:\v\{n}") for n in names]
     )
-    return [player_env.get_by_path(rf"D:\v\{n}") for n in names]
+    return [repo.get_by_path(rf"D:\v\{n}") for n in names]
 
 
-def test_queue_auto_advances_on_natural_end(qapp, player_env, fake_player):
+def test_queue_auto_advances_on_natural_end(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
-    w = PlayerWindow(a, player_env, queue=[a, b, c])
+    a, b, c = _ensure_videos(repo, "a.mp4", "b.mp4", "c.mp4")
+    w = PlayerWindow(a, repo, queue=[a, b, c])
     try:
         assert w.windowTitle() == "a.mp4"
         w._on_end()
@@ -273,19 +250,19 @@ def test_queue_auto_advances_on_natural_end(qapp, player_env, fake_player):
 
         w._on_end()
         assert not w.isVisible(), "the last video must close the window"
-        assert player_env.last_position(a.id) == 0.0
-        assert player_env.last_position(b.id) == 0.0
-        assert player_env.last_position(c.id) == 0.0
+        assert repo.last_position(a.id) == 0.0
+        assert repo.last_position(b.id) == 0.0
+        assert repo.last_position(c.id) == 0.0
     finally:
         w.close()
 
 
-def test_queue_buttons_switch_without_replay_of_resume(qapp, player_env, fake_player):
+def test_queue_buttons_switch_without_replay_of_resume(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
-    player_env.record_play(b.id, 42.0)
-    w = PlayerWindow(b, player_env, queue=[a, b, c])
+    a, b, c = _ensure_videos(repo, "a.mp4", "b.mp4", "c.mp4")
+    repo.record_play(b.id, 42.0)
+    w = PlayerWindow(b, repo, queue=[a, b, c])
     try:
         assert w.btn_prev.isEnabled(), "middle video must enable both buttons"
         assert w.btn_next.isEnabled()
@@ -305,20 +282,20 @@ def test_queue_buttons_switch_without_replay_of_resume(qapp, player_env, fake_pl
         w.close()
 
 
-def test_queue_end_of_middle_records_but_keeps_window(qapp, player_env, fake_player):
+def test_queue_end_of_middle_records_but_keeps_window(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a, b = _ensure_videos(player_env, "a.mp4", "b.mp4")
-    w = PlayerWindow(a, player_env, queue=[a, b])
+    a, b = _ensure_videos(repo, "a.mp4", "b.mp4")
+    w = PlayerWindow(a, repo, queue=[a, b])
     w._on_end()
-    assert player_env.last_position(a.id) == 0.0, "finished video must be recorded"
+    assert repo.last_position(a.id) == 0.0, "finished video must be recorded"
     assert w.isVisible() or True  # window stays open for the next video
     w.close()
 
 
-def test_mute_toggle_button_and_m_key(qapp, player_env, fake_player):
-    _ensure_video(player_env)
-    w = _window(player_env)
+def test_mute_toggle_button_and_m_key(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
     try:
         assert w.btn_mute.text() == "静音"
         w.btn_mute.click()
@@ -336,11 +313,11 @@ def test_mute_toggle_button_and_m_key(qapp, player_env, fake_player):
         w.close()
 
 
-def test_loop_single_replays_current(qapp, player_env, fake_player):
+def test_loop_single_replays_current(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a, b = _ensure_videos(player_env, "a.mp4", "b.mp4")
-    w = PlayerWindow(a, player_env, queue=[a, b])
+    a, b = _ensure_videos(repo, "a.mp4", "b.mp4")
+    w = PlayerWindow(a, repo, queue=[a, b])
     try:
         assert w.btn_loop.text() == "循环:关"
         w.btn_loop.click()
@@ -354,11 +331,11 @@ def test_loop_single_replays_current(qapp, player_env, fake_player):
         w.close()
 
 
-def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
+def test_loop_all_wraps_to_first(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
-    w = PlayerWindow(c, player_env, queue=[a, b, c])
+    a, b, c = _ensure_videos(repo, "a.mp4", "b.mp4", "c.mp4")
+    w = PlayerWindow(c, repo, queue=[a, b, c])
     try:
         w.btn_loop.click()
         w.btn_loop.click()
@@ -367,7 +344,7 @@ def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
         w._on_end()
         assert w.windowTitle() == "a.mp4", "all loop must wrap to the first video"
         assert w.session.loads[-1][0] == r"D:\v\a.mp4"
-        assert player_env.last_position(c.id) == 0.0
+        assert repo.last_position(c.id) == 0.0
 
         QTest.keyClick(w, Qt.Key.Key_L)
         assert w.btn_loop.text() == "循环:关", "L must cycle loop modes"
@@ -375,52 +352,52 @@ def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
         w.close()
 
 
-def _mk_res(player_env, name, path, resolution):
+def _mk_res(repo, name, path, resolution):
     from domain.models import Video
 
-    player_env.upsert_videos([Video(filename=name, filepath=path, resolution=resolution)])
-    return player_env.get_by_path(path)
+    repo.upsert_videos([Video(filename=name, filepath=path, resolution=resolution)])
+    return repo.get_by_path(path)
 
 
-def test_fit_window_landscape_by_resolution(qapp, player_env, fake_player):
+def test_fit_window_landscape_by_resolution(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a = _mk_res(player_env, "a.mp4", r"D:\v\land.mp4", "1920x1080")
-    w = PlayerWindow(a, player_env)
+    a = _mk_res(repo, "a.mp4", r"D:\v\land.mp4", "1920x1080")
+    w = PlayerWindow(a, repo)
     try:
         assert w.width() > w.height(), "16:9 video must open a landscape window"
     finally:
         w.close()
 
 
-def test_fit_window_portrait_by_resolution(qapp, player_env, fake_player):
+def test_fit_window_portrait_by_resolution(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a = _mk_res(player_env, "a.mp4", r"D:\v\port.mp4", "720x1280")
-    w = PlayerWindow(a, player_env)
+    a = _mk_res(repo, "a.mp4", r"D:\v\port.mp4", "720x1280")
+    w = PlayerWindow(a, repo)
     try:
         assert w.width() < w.height(), "9:16 video must open a portrait window"
     finally:
         w.close()
 
 
-def test_fit_window_fallback_without_resolution(qapp, player_env, fake_player):
+def test_fit_window_fallback_without_resolution(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a = _mk_res(player_env, "a.mp4", r"D:\v\nores.mp4", None)
-    w = PlayerWindow(a, player_env)
+    a = _mk_res(repo, "a.mp4", r"D:\v\nores.mp4", None)
+    w = PlayerWindow(a, repo)
     try:
         assert w.width() > w.height(), "missing resolution must fall back to 16:9"
     finally:
         w.close()
 
 
-def test_fit_window_adapts_on_switch(qapp, player_env, fake_player):
+def test_fit_window_adapts_on_switch(qapp, repo, fake_player):
     from ui.player import PlayerWindow
 
-    a = _mk_res(player_env, "a.mp4", r"D:\v\land.mp4", "1920x1080")
-    b = _mk_res(player_env, "b.mp4", r"D:\v\port.mp4", "720x1280")
-    w = PlayerWindow(a, player_env, queue=[a, b])
+    a = _mk_res(repo, "a.mp4", r"D:\v\land.mp4", "1920x1080")
+    b = _mk_res(repo, "b.mp4", r"D:\v\port.mp4", "720x1280")
+    w = PlayerWindow(a, repo, queue=[a, b])
     try:
         assert w.width() > w.height(), "first video is landscape"
         w.btn_next.click()

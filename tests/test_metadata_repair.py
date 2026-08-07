@@ -1,56 +1,17 @@
 import os
-import sys
 import time
-from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from PyQt6.QtWidgets import QApplication
 
 from domain.models import Video
 from domain.repository import Repository
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture()
-def repo(tmp_path):
-    r = Repository(tmp_path / "test.db")
-    yield r
-    r.close()
+from tests.helpers import make_test_video
 
 
 def _mk(filename: str, filepath: str, **kw) -> Video:
     defaults = dict(filename=filename, filepath=filepath, file_size=1024)
     defaults.update(kw)
     return Video(**defaults)
-
-
-def _make_test_video(path: Path, seconds: int = 1) -> Path:
-    """Tiny real mpeg4 so probes succeed (mirrors test_scan helper)."""
-    import av
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(path), "w") as container:
-        stream = container.add_stream("mpeg4", rate=10)
-        stream.width = 64
-        stream.height = 48
-        stream.pix_fmt = "yuv420p"
-        for i in range(seconds * 10):
-            frame = av.VideoFrame(64, 48, "yuv420p")
-            for plane in frame.planes:
-                plane.update(bytes([i % 256]) * plane.buffer_size)
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return path
 
 
 def test_schema_has_probe_retry_at(repo):
@@ -130,7 +91,7 @@ def test_missing_metadata_under_scoped_to_root(repo):
 def test_diff_scan_includes_missing_meta(tmp_path):
     from services.scanner import diff_scan
 
-    a = _make_test_video(tmp_path / "a.mp4")
+    a = make_test_video(tmp_path / "a.mp4")
     st = a.stat()
     files = [str(a)]
     existing = {str(a): (st.st_size, st.st_mtime)}
@@ -146,7 +107,7 @@ def test_diff_scan_includes_missing_meta(tmp_path):
 def test_repair_thread_fixes_probeable_row(qapp, tmp_path):
     from ui.main_window import _MetadataRepairThread
 
-    real = _make_test_video(tmp_path / "real.mp4")
+    real = make_test_video(tmp_path / "real.mp4")
     r = Repository(tmp_path / "repair.db")
     try:
         r.upsert_videos([_mk("real.mp4", str(real))])  # NULL metadata
@@ -211,7 +172,7 @@ def test_repair_runs_at_startup(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
 
     repo = Repository(tmp_path / "videolib.db")
-    real = _make_test_video(tmp_path / "real.mp4")
+    real = make_test_video(tmp_path / "real.mp4")
     repo.upsert_videos([_mk("real.mp4", str(real))])
 
     from ui.main_window import MainWindow

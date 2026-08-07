@@ -1,23 +1,9 @@
 """MpvSession 命令格式与 IPC 读取健壮性测试(不启动真实 mpv 进程)。"""
 import ctypes
-import os
-import sys
-from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
 from services.mpv_session import MpvIpcClient, MpvSession
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 def _session(qapp):

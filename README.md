@@ -67,8 +67,10 @@ build.bat
 ## 开发
 
 ```bat
-python -m pytest tests -q     :: 运行测试（187 个用例）
+python -m pytest tests -q     :: 运行测试（187 个用例，约 6 秒）
 ```
+
+测试基础设施：`tests/conftest.py` 提供共享 fixture（session 级 `qapp`、`repo`、`app_env`/`backup_env` 环境隔离、备份目录隔离），`tests/helpers.py` 提供 `make_test_video` / `wait_for` / `mk_video` 通用辅助；watcher 测试用可参数化的短防抖/短轮询（`WatcherThread(..., debounce=0.2, poll=0.05)`）避免真实 2s 等待。
 
 ### 目录结构
 

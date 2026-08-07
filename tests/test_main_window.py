@@ -1,44 +1,10 @@
 import os
-import sys
-import time
-from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QApplication, QHeaderView
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture()
-def app_env(tmp_path, monkeypatch):
-    """Isolate config paths so MainWindow never touches the real ~/.videolib."""
-    import config
-
-    monkeypatch.setattr(config, "APP_DIR", tmp_path)
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "videolib.db")
-    monkeypatch.setattr(config, "THUMBS_DIR", tmp_path / "thumbs")
-    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
-
-    from domain.repository import Repository
-
-    repo = Repository(tmp_path / "videolib.db")
-    yield repo
-    repo.close()
-
-
-def _mk_video(repo, filename: str, filepath: str) -> None:
-    from domain.models import Video
-
-    repo.upsert_videos([Video(filename=filename, filepath=filepath)])
+from PyQt6.QtWidgets import QHeaderView
+from tests.helpers import mk_video, wait_for
 
 
 def _make_window(app_env):
@@ -50,21 +16,12 @@ def _make_window(app_env):
     return w
 
 
-def _wait_for(predicate, timeout=10.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def test_regenerate_keeps_cached_pixmap_until_ready(qapp, app_env):
     """Mass regeneration must not blank the thumbnail column: old pixmaps
     stay cached until the new file lands (atomic swap on the write side)."""
     from PyQt6.QtGui import QPixmap
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     w = _make_window(app_env)
     try:
         model = w.model
@@ -84,7 +41,7 @@ def test_regenerate_keeps_cached_pixmap_until_ready(qapp, app_env):
 def test_thumb_ready_null_decodes_drop_request_for_retry(qapp, app_env):
     """A corrupt JPEG that cannot be decoded must not poison the session:
     its id leaves _requested so a later paint/refresh retries generation."""
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     w = _make_window(app_env)
     try:
         model = w.model
@@ -109,8 +66,8 @@ def test_hover_tracks_any_column(qapp, app_env):
     from PyQt6.QtCore import QEvent, QPointF
     from PyQt6.QtGui import QMouseEvent
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
-    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/b.mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
@@ -133,7 +90,7 @@ def test_hover_tracks_any_column(qapp, app_env):
 
 def test_title_column_stretches(qapp, app_env):
     """Stretch/ResizeToContents must be honored after setModel (regression: was 100px)."""
-    _mk_video(app_env, "超" * 40 + ".mp4", "D:/x/" + "超" * 40 + ".mp4")
+    mk_video(app_env, "D:/x/" + "超" * 40 + ".mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
@@ -145,8 +102,8 @@ def test_title_column_stretches(qapp, app_env):
 def test_rows_have_fixed_height(qapp, app_env):
     """At library scale rows must keep a fixed height (no per-row size hints),
     and long filenames are still reachable via the full-path tooltip."""
-    _mk_video(app_env, "超" * 300 + ".mp4", "D:/x/" + "超" * 300 + ".mp4")
-    _mk_video(app_env, "短.mp4", "D:/x/短.mp4")
+    mk_video(app_env, "D:/x/" + "超" * 300 + ".mp4")
+    mk_video(app_env, "D:/x/短.mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
@@ -170,7 +127,7 @@ def test_remove_favorite_direct_from_current_list(qapp, app_env, monkeypatch):
 
     from ui.main_window import VIEW_ALL, VIEW_FAVORITES
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     lst = app_env.create_favorite_list("收藏夹_默认")
     a = app_env.get_by_path("D:/x/a.mp4")
     app_env.add_favorite(a.id, lst.id)
@@ -214,8 +171,8 @@ def test_count_label_follows_view(qapp, app_env):
     """The status bar must show the video count of the current view."""
     from ui.main_window import VIEW_ALL, VIEW_FAVORITES
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
-    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/b.mp4")
     lst = app_env.create_favorite_list("收藏夹_默认")
     w = _make_window(app_env)
     try:
@@ -238,8 +195,8 @@ def test_model_show_maps_views(qapp, app_env):
     """The view→query mapping must live in VideoTableModel.show()."""
     from ui.video_list import ViewKind
 
-    _mk_video(app_env, "a.mp4", r"D:\r\a.mp4")
-    _mk_video(app_env, "b.mp4", r"D:\o\b.mp4")
+    mk_video(app_env, r"D:\r\a.mp4")
+    mk_video(app_env, r"D:\o\b.mp4")
     lst = app_env.create_favorite_list("收藏夹_默认")
     a = app_env.get_by_path(r"D:\r\a.mp4")
     app_env.add_favorite(a.id, lst.id)
@@ -275,7 +232,7 @@ def test_remove_from_library_drops_row_and_thumb(qapp, app_env, monkeypatch):
     import config
     from services.thumbnailer import Thumbnailer
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     v = app_env.get_by_path("D:/x/a.mp4")
     lst = app_env.create_favorite_list("收藏夹_默认")
     app_env.add_favorite(v.id, lst.id)
@@ -304,7 +261,7 @@ def test_delete_files_moves_to_trash_then_removes(qapp, app_env, monkeypatch):
     from PyQt6.QtCore import QFile
     from PyQt6.QtWidgets import QMessageBox
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     v = app_env.get_by_path("D:/x/a.mp4")
 
     trashed = []
@@ -331,7 +288,7 @@ def test_clear_play_history_wipes_recent_and_resume(qapp, app_env, monkeypatch):
 
     from ui.video_list import ViewKind
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     a = app_env.get_by_path("D:/x/a.mp4")
     app_env.record_play(a.id, 42.0)
 
@@ -364,7 +321,7 @@ def test_clear_play_history_refused_keeps_data(qapp, app_env, monkeypatch):
     """A declined confirm box must not touch play history."""
     from PyQt6.QtWidgets import QMessageBox
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     a = app_env.get_by_path("D:/x/a.mp4")
     app_env.record_play(a.id, 42.0)
 
@@ -387,7 +344,7 @@ def test_clear_all_directories_refused_keeps_everything(qapp, app_env, monkeypat
     """A declined first confirm must not start a clear worker."""
     from PyQt6.QtWidgets import QMessageBox
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     app_env.register_scan("D:/x")
     w = _make_window(app_env)
     monkeypatch.setattr(
@@ -409,7 +366,7 @@ def test_clear_all_directories_second_confirm_refused(qapp, app_env, monkeypatch
     """The double confirm must both be Yes before anything is deleted."""
     from PyQt6.QtWidgets import QMessageBox
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     w = _make_window(app_env)
     answers = iter([QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No])
     monkeypatch.setattr(
@@ -433,8 +390,8 @@ def test_clear_all_directories_wipes_library_keeps_history(qapp, app_env, monkey
 
     from services.thumbnailer import Thumbnailer
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
-    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/b.mp4")
     a = app_env.get_by_path("D:/x/a.mp4")
     b = app_env.get_by_path("D:/x/b.mp4")
     app_env.register_scan("D:/x")
@@ -448,7 +405,7 @@ def test_clear_all_directories_wipes_library_keeps_history(qapp, app_env, monkey
     try:
         qapp.processEvents()
         w._clear_all_directories()
-        assert _wait_for(
+        assert wait_for(
             lambda: w._clear_worker is not None and w._clear_worker.isFinished()
         ), "clear worker did not finish"
         for _ in range(30):
@@ -496,8 +453,8 @@ def test_mark_finished_clears_resume_keeps_recent(qapp, app_env, monkeypatch):
 def test_copy_paths_and_names_to_clipboard(qapp, app_env):
     from PyQt6.QtWidgets import QApplication
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
-    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/b.mp4")
     a = app_env.get_by_path("D:/x/a.mp4")
     b = app_env.get_by_path("D:/x/b.mp4")
 
@@ -515,7 +472,7 @@ def test_copy_paths_and_names_to_clipboard(qapp, app_env):
 def test_stats_dialog_shows_totals(qapp, app_env, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     captured = {}
     monkeypatch.setattr(
         QMessageBox, "information",
@@ -586,8 +543,8 @@ def test_table_mime_data_carries_video_ids(qapp, app_env):
 
     from ui.video_list import MIME_VIDEO_IDS, ViewKind
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
-    _mk_video(app_env, "b.mp4", "D:/x/b.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/b.mp4")
     a = app_env.get_by_path("D:/x/a.mp4")
     b = app_env.get_by_path("D:/x/b.mp4")
 
@@ -609,7 +566,7 @@ def test_confirm_delete_refused_keeps_everything(qapp, app_env, monkeypatch):
     """A declined confirm box must not remove rows or files."""
     from PyQt6.QtWidgets import QMessageBox
 
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     v = app_env.get_by_path("D:/x/a.mp4")
     monkeypatch.setattr(
         QMessageBox, "warning",
@@ -629,7 +586,7 @@ def test_confirm_delete_refused_keeps_everything(qapp, app_env, monkeypatch):
 
 def test_window_state_remembered_across_runs(qapp, app_env):
     """Geometry and column widths must survive a close and reopen."""
-    _mk_video(app_env, "a.mp4", "D:/x/a.mp4")
+    mk_video(app_env, "D:/x/a.mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
@@ -715,7 +672,7 @@ def test_sort_persisted_across_runs(qapp, app_env):
 
 def test_play_column_fits_button(qapp, app_env):
     """ResizeToContents must not collapse the self-drawn play column (regression: 28px)."""
-    _mk_video(app_env, "测试.mp4", "D:/x/测试.mp4")
+    mk_video(app_env, "D:/x/测试.mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
@@ -783,7 +740,7 @@ def test_resume_marker_shown_when_in_range(qapp, app_env):
 
 
 def test_resume_marker_empty_without_history(qapp, app_env):
-    _mk_video(app_env, "fresh.mp4", "D:/x/fresh.mp4")
+    mk_video(app_env, "D:/x/fresh.mp4")
     w = _make_window(app_env)
     try:
         qapp.processEvents()
@@ -851,7 +808,7 @@ def test_find_duplicates_reports_groups(qapp, app_env, monkeypatch):
 
 
 def test_find_duplicates_empty_result(qapp, app_env, monkeypatch):
-    _mk_video(app_env, "only.mp4", "D:/x/only.mp4")
+    mk_video(app_env, "D:/x/only.mp4")
     w = _make_window(app_env)
     try:
         captured = _capture_info(monkeypatch)
@@ -879,7 +836,7 @@ def test_regenerate_thumbs_deletes_files(qapp, app_env, tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr("ui.video_list.ThumbRunnable", _FakeRunnable)
-    _mk_video(app_env, "a.mp4", str(video_file))
+    mk_video(app_env, str(video_file))
     v = app_env.get_by_path(str(video_file))
     thumb = config.THUMBS_DIR / f"{v.id}.jpg"
     thumb.parent.mkdir(parents=True, exist_ok=True)

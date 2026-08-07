@@ -1,41 +1,18 @@
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domain.models import Video
 from domain.repository import Repository
 from services.metadata import build_video, probe
 from services.scanner import scan_directory
 from services.thumbnailer import Thumbnailer
-
-
-def _make_test_video(path: Path, seconds: int = 1) -> Path:
-    """Generate a tiny real video file using PyAV (mpeg4, 64x48)."""
-    import av
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(path), "w") as container:
-        stream = container.add_stream("mpeg4", rate=10)
-        stream.width = 64
-        stream.height = 48
-        stream.pix_fmt = "yuv420p"
-        for i in range(seconds * 10):
-            frame = av.VideoFrame(64, 48, "yuv420p")
-            for plane in frame.planes:
-                plane.update(bytes([i % 256]) * plane.buffer_size)
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return path
+from tests.helpers import make_test_video, wait_for
 
 
 @pytest.fixture()
 def video_dir(tmp_path):
-    return _make_test_video(tmp_path / "sample" / "movie.mp4", seconds=1)
+    return make_test_video(tmp_path / "sample" / "movie.mp4", seconds=1)
 
 
 def test_scan_directory(video_dir, tmp_path):
@@ -51,7 +28,7 @@ def test_scan_directory_ignores_non_video(tmp_path):
 
 def test_scan_directory_finds_bin(tmp_path):
     """Extension-only enumeration must see .bin; the content filter runs later."""
-    real = _make_test_video(tmp_path / "movie.mp4").rename(tmp_path / "movie.bin")
+    real = make_test_video(tmp_path / "movie.mp4").rename(tmp_path / "movie.bin")
     garbage = tmp_path / "fake.bin"
     garbage.write_bytes(b"not a video")
     assert set(scan_directory(str(tmp_path))) == {str(real), str(garbage)}
@@ -60,8 +37,8 @@ def test_scan_directory_finds_bin(tmp_path):
 def test_diff_scan(tmp_path):
     from services.scanner import diff_scan
 
-    a = _make_test_video(tmp_path / "a.mp4")
-    b = _make_test_video(tmp_path / "b.mp4")
+    a = make_test_video(tmp_path / "a.mp4")
+    b = make_test_video(tmp_path / "b.mp4")
     st_a = a.stat()
     st_b = b.stat()
     existing = {
@@ -341,33 +318,22 @@ def test_thumb_not_reused_after_data_removed(video_dir, tmp_path):
     repo.close()
 
 
-def _wait_for(condition, timeout=20.0, interval=0.05):
-    import time
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if condition():
-            return True
-        time.sleep(interval)
-    return False
-
-
 def test_scan_worker_completes_and_cleans_stale(tmp_path):
     from ui.scan_worker import ScanWorker
 
     repo = Repository(tmp_path / "db.sqlite")
     root = tmp_path / "root"
     root.mkdir()
-    stale_file = _make_test_video(root / "gone" / "old.mp4")
+    stale_file = make_test_video(root / "gone" / "old.mp4")
     repo.upsert_videos([build_video(str(stale_file))])
     stale_file.unlink()
-    keep_file = _make_test_video(tmp_path / "other" / "keep.mp4")
+    keep_file = make_test_video(tmp_path / "other" / "keep.mp4")
     repo.upsert_videos([build_video(str(keep_file))])
     for i in range(2):
-        _make_test_video(root / f"v{i}.mp4")
+        make_test_video(root / f"v{i}.mp4")
     worker = ScanWorker(str(root), repo)
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "scan worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "scan worker did not finish"
     assert repo.get_by_path(str(stale_file)) is None, "stale under root must be removed"
     assert repo.get_by_path(str(keep_file)) is not None, "other root must be preserved"
     assert repo.count() == 3
@@ -380,12 +346,12 @@ def test_scan_worker_cancel_keeps_stale(tmp_path, monkeypatch):
     from ui.scan_worker import ScanWorker
 
     repo = Repository(tmp_path / "db.sqlite")
-    stale_file = _make_test_video(tmp_path / "old" / "old.mp4")
+    stale_file = make_test_video(tmp_path / "old" / "old.mp4")
     repo.upsert_videos([build_video(str(stale_file))])
     root = tmp_path / "root"
     root.mkdir()
     for i in range(20):
-        _make_test_video(root / f"v{i}.mp4")
+        make_test_video(root / f"v{i}.mp4")
 
     def slow_build(fp):
         time.sleep(0.1)
@@ -396,7 +362,7 @@ def test_scan_worker_cancel_keeps_stale(tmp_path, monkeypatch):
     worker.start()
     time.sleep(0.3)
     worker.cancel()
-    assert _wait_for(lambda: worker.isFinished()), "canceled worker did not stop"
+    assert wait_for(lambda: worker.isFinished()), "canceled worker did not stop"
     assert repo.get_by_path(str(stale_file)) is not None, "cancel must not remove stale rows"
     assert repo.count() < 21, "cancel did not stop processing"
     repo.close()
@@ -413,7 +379,7 @@ def test_scan_worker_keeps_other_root_data(tmp_path):
     root_b = tmp_path / "B"
     root_a.mkdir()
     root_b.mkdir()
-    va = _make_test_video(root_a / "va.mp4")
+    va = make_test_video(root_a / "va.mp4")
     repo.upsert_videos([build_video(str(va))])
     a = repo.get_by_path(str(va))
     lst = repo.create_favorite_list("收藏夹_测试")
@@ -421,10 +387,10 @@ def test_scan_worker_keeps_other_root_data(tmp_path):
     cat = repo.add_category("我的分类", root=str(root_a))
     repo.assign_category(a.id, cat.id)
 
-    vb = _make_test_video(root_b / "vb.mp4")
+    vb = make_test_video(root_b / "vb.mp4")
     worker = ScanWorker(str(root_b), repo)
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "scan worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "scan worker did not finish"
     assert repo.get_by_path(str(va)) is not None, "other root's video was wiped"
     assert repo.is_favorite(a.id, lst.id), "favorite was wiped"
     assert [c.id for c in repo.categories_of_video(a.id)] == [cat.id], "category was wiped"
@@ -444,8 +410,8 @@ def test_scan_worker_incremental_skips_unchanged(tmp_path, monkeypatch):
     repo = Repository(tmp_path / "db.sqlite")
     root = tmp_path / "root"
     root.mkdir()
-    f1 = _make_test_video(root / "v1.mp4")
-    f2 = _make_test_video(root / "v2.mp4")
+    f1 = make_test_video(root / "v1.mp4")
+    f2 = make_test_video(root / "v2.mp4")
     probe_count = {"n": 0}
     real_build = build_video
 
@@ -457,19 +423,19 @@ def test_scan_worker_incremental_skips_unchanged(tmp_path, monkeypatch):
 
     worker = ScanWorker(str(root), repo)
     worker.start()
-    assert _wait_for(lambda: worker.isFinished())
+    assert wait_for(lambda: worker.isFinished())
     assert probe_count["n"] == 2, "first scan must probe everything"
 
     worker = ScanWorker(str(root), repo)
     worker.start()
-    assert _wait_for(lambda: worker.isFinished())
+    assert wait_for(lambda: worker.isFinished())
     assert probe_count["n"] == 2, "unchanged files must be skipped"
 
     st = f2.stat()
     os.utime(f2, (st.st_atime, st.st_mtime + 5.0))
     worker = ScanWorker(str(root), repo)
     worker.start()
-    assert _wait_for(lambda: worker.isFinished())
+    assert wait_for(lambda: worker.isFinished())
     assert probe_count["n"] == 3, "only the modified file must be re-probed"
     repo.close()
 
@@ -482,12 +448,12 @@ def test_scan_worker_empty_dir_not_registered(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     (root / "notes.txt").write_text("not a video")
-    keep_file = _make_test_video(tmp_path / "other" / "keep.mp4")
+    keep_file = make_test_video(tmp_path / "other" / "keep.mp4")
     repo.upsert_videos([build_video(str(keep_file))])
 
     worker = ScanWorker(str(root), repo)
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "scan worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "scan worker did not finish"
     assert repo.get_scan_roots() == [], "empty dir must not be registered"
     assert repo.get_by_path(str(keep_file)) is not None, "existing data must be untouched"
     assert repo.count() == 1

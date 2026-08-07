@@ -1,28 +1,6 @@
-import os
-import sys
-from pathlib import Path
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QTreeWidgetItemIterator
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture()
-def cat_env(tmp_path):
-    from domain.repository import Repository
-
-    repo = Repository(tmp_path / "db.sqlite")
-    yield repo
-    repo.close()
+from PyQt6.QtWidgets import QTreeWidgetItemIterator
 
 
 def _tree_items(tree):
@@ -59,8 +37,8 @@ def _iter_items(tree):
         it += 1
 
 
-def test_all_dirs_view_groups_categories_by_root(qapp, cat_env):
-    tree = _fill(cat_env)
+def test_all_dirs_view_groups_categories_by_root(qapp, repo):
+    tree = _fill(repo)
     tree.reload("")
 
     items = _tree_items(tree)
@@ -81,8 +59,8 @@ def test_all_dirs_view_groups_categories_by_root(qapp, cat_env):
     assert roots["乙"] == r"D:\b"
 
 
-def test_single_root_view_hangs_categories_off_root_item(qapp, cat_env):
-    tree = _fill(cat_env)
+def test_single_root_view_hangs_categories_off_root_item(qapp, repo):
+    tree = _fill(repo)
     tree.reload(r"D:\a")
 
     items = _tree_items(tree)
@@ -91,8 +69,8 @@ def test_single_root_view_hangs_categories_off_root_item(qapp, cat_env):
     assert texts == ["a", "甲", "甲子"], "no grouping node in single-root view"
 
 
-def test_group_node_click_emits_nothing(qapp, cat_env):
-    tree = _fill(cat_env)
+def test_group_node_click_emits_nothing(qapp, repo):
+    tree = _fill(repo)
     tree.reload("")
 
     emitted = []
@@ -113,8 +91,8 @@ def test_group_node_click_emits_nothing(qapp, cat_env):
     assert emitted == [category.data(0, Qt.ItemDataRole.UserRole)]
 
 
-def test_group_node_has_no_category_id_for_menu_and_drop(qapp, cat_env):
-    tree = _fill(cat_env)
+def test_group_node_has_no_category_id_for_menu_and_drop(qapp, repo):
+    tree = _fill(repo)
     tree.reload("")
 
     tree.setCurrentItem(next(

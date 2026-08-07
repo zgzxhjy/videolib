@@ -1,65 +1,18 @@
 import sqlite3
-import sys
 import time
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
 from domain.repository import Repository
 from services.metadata import build_video
 from services.thumbnailer import Thumbnailer
+from tests.helpers import make_test_video, wait_for
 from ui.delete_worker import DeleteWorker
-
-
-def _make_test_video(path: Path, seconds: int = 1) -> Path:
-    """Generate a tiny real video file using PyAV (mpeg4, 64x48)."""
-    import av
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(path), "w") as container:
-        stream = container.add_stream("mpeg4", rate=10)
-        stream.width = 64
-        stream.height = 48
-        stream.pix_fmt = "yuv420p"
-        for i in range(seconds * 10):
-            frame = av.VideoFrame(64, 48, "yuv420p")
-            for plane in frame.planes:
-                plane.update(bytes([i % 256]) * plane.buffer_size)
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return path
 
 
 def _thumb(thumbs_dir: Path, video_id: int) -> Path:
     return Thumbnailer(thumbs_dir).path_for(video_id)
-
-
-def _wait_for(predicate, timeout=10.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture()
-def repo(tmp_path):
-    r = Repository(tmp_path / "db.sqlite")
-    yield r
-    r.close()
 
 
 def _drain(qapp) -> None:
@@ -73,8 +26,8 @@ def _setup(tmp_path, repo, n=3):
     other = tmp_path / "other"
     root.mkdir()
     other.mkdir()
-    files = [_make_test_video(root / f"v{i}.mp4") for i in range(n)]
-    keep = _make_test_video(other / "keep.mp4")
+    files = [make_test_video(root / f"v{i}.mp4") for i in range(n)]
+    keep = make_test_video(other / "keep.mp4")
     repo.upsert_videos([build_video(str(f)) for f in files] + [build_video(str(keep))])
     repo.register_scan(str(root))
     repo.register_scan(str(other))
@@ -91,7 +44,7 @@ def test_delete_worker_completes(qapp, tmp_path, repo):
     worker = DeleteWorker(str(root), repo, thumbs_dir=thumbs_dir)
     worker.done.connect(lambda deleted, removed: events.append((deleted, removed)))
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "worker did not finish"
     _drain(qapp)
     assert events == [(3, True)]
     assert repo.get_by_path(str(files[0])) is None
@@ -121,7 +74,7 @@ def test_delete_worker_cancel_keeps_root_for_retry(qapp, tmp_path, repo, monkeyp
     holder["worker"] = worker
     worker.done.connect(lambda deleted, removed: events.append((deleted, removed)))
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "worker did not finish"
     _drain(qapp)
     assert events == [(3, False)]
     assert repo.get_by_path(str(files[0])) is None
@@ -135,7 +88,7 @@ def test_delete_worker_reports_progress(qapp, tmp_path, repo):
     worker = DeleteWorker(str(root), repo, thumbs_dir=thumbs_dir)
     worker.progress.connect(lambda done, total, fp: progress.append((done, total)))
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "worker did not finish"
     _drain(qapp)
     assert progress == [(1, 3), (2, 3), (3, 3)]
 
@@ -146,7 +99,7 @@ def test_delete_worker_clear_all_mode(qapp, tmp_path, repo):
     worker = DeleteWorker(None, repo, thumbs_dir=thumbs_dir)
     worker.done.connect(lambda deleted, removed: events.append((deleted, removed)))
     worker.start()
-    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    assert wait_for(lambda: worker.isFinished()), "worker did not finish"
     _drain(qapp)
     assert events == [(4, False)], "clear-all deletes every row, never a scan root"
     assert repo.count() == 0
@@ -161,8 +114,8 @@ def test_clear_all_videos_keeps_roots_and_cascades(tmp_path):
     and the category tree."""
     db = tmp_path / "db.sqlite"
     r = Repository(db)
-    f1 = _make_test_video(tmp_path / "a.mp4")
-    f2 = _make_test_video(tmp_path / "b.mp4")
+    f1 = make_test_video(tmp_path / "a.mp4")
+    f2 = make_test_video(tmp_path / "b.mp4")
     r.upsert_videos([build_video(str(f1)), build_video(str(f2))])
     r.register_scan(str(tmp_path))
     v1 = r.get_by_path(str(f1))
@@ -217,8 +170,8 @@ def test_fts_heal_on_open(tmp_path):
     opening the repo must rebuild it so search shows no ghosts."""
     db = tmp_path / "db.sqlite"
     r = Repository(db)
-    f1 = _make_test_video(tmp_path / "a.mp4")
-    f2 = _make_test_video(tmp_path / "b.mp4")
+    f1 = make_test_video(tmp_path / "a.mp4")
+    f2 = make_test_video(tmp_path / "b.mp4")
     r.upsert_videos([build_video(str(f1)), build_video(str(f2))])
     r.close()
 
