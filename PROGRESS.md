@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-05（会话 7：播放器增强 + 右键菜单 + 统计 + 拖拽）
+> 最后更新：2026-08-07（会话 10：播放器黑边错位/断点无法播放修复——DPI 物理像素 + loadfile 新签名，坑 #28-30）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,8 +9,8 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，52 个用例全绿
-- git：11 个提交（含已提交的 7baa29d/5213818；会话 4 改动待提交），分支 master
+- 测试：pytest，177 个用例全绿
+- git：44 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）
 
@@ -104,6 +104,10 @@ build.bat                               # 打包 → dist\VideoLib.exe
 25. **ctypes WNDPROC cast 后对象被 GC → CreateWindowExW 回调悬垂 → access violation（0xC0000409）**：`wc.lpfnWndProc = ctypes.cast(WNDPROC(wndproc), c_void_p)` 只拷贝裸指针，函数返回后 WNDPROC 对象无引用即回收。修复：**wndproc 提为模块级函数 + WNDPROC 实例模块级持有 + 窗口类只注册一次**。症状：构造 PlayerWindow 时崩、独立 MpvSession 冒烟却偶尔不崩（GC 时序敏感）。
 26. **named pipe 客户端必须轮询 connect**：`WaitNamedPipeW` 在 **pipe 不存在时立即返回失败（不等待）**，而 mpv 冷启动（d3d11 init）需 1-3 秒才建 pipe → 一次调用必然 FileNotFoundError。修复：循环 WaitNamedPipeW(250)/CreateFileW + 150ms 退避至 deadline。
 27. **同步 ReadFile 阻塞会锁死同句柄另一线程的 WriteFile**：读线程先阻塞 `ReadFile`（等 mpv 事件）后，主线程 `WriteFile` 永远不返回（mpv 日志停在 "Client connected"，命令根本没送达）。修复：**读侧永不阻塞**——`PeekNamedPipe` 探测有数据才 ReadFile，无数据 sleep 50ms 轮询；ReadFile 一次读入的多行 JSON 要按行拆分逐条消费（time-pos 事件 100ms 一个会堆积）。
+28. **mpv 0.38+ `loadfile` 签名变化（断点续播失效）**：签名变为 `loadfile <url> [flags [index [options]]]`——options 是第 4 参，**必须用 `-1` 占位 index**；旧格式 `["loadfile", path, "replace", {"start": 5.0}]` 把 dict 顶到 index 位 → 报 `Command loadfile: argument index has incompatible type` → **加载被拒、黑屏且无任何 UI 报错**（44 个会话日志中 13 个命中，恰是带断点的视频，~30% 概率复现）。修复：`resume>0` 时发 `["loadfile", path, "replace", -1, {"start": f"{round(resume,3)}"}]`（options 为 map 可接受，但**值必须是字符串**，`{"start": 5}` 同样 invalid）。铁律：**loadfile 带 options 必须显式 `-1` 占位 + 值字符串化**。
+29. **Win32 子窗口尺寸必须物理像素**：`CreateWindowExW`/`SetWindowPos` 用物理坐标，而 Qt 的 `resize()`/geometry 是逻辑像素。125% 缩放屏（mpv 日志 `DPI detected from the new API: 120`）上直接用逻辑尺寸建 child → child 只有容器的 80%（956x496 vs 应有 1195x620）→ **画面贴左上角、右边/下方大段空白**（mpv 渲染区 = child 物理尺寸，跟随 resize 正常，问题只在建窗尺寸）。修复：`ensure_child`/`resizeEvent` 尺寸乘 `devicePixelRatio()`。
+30. **named pipe 字节流会被 4096 块切半行**：按行拆分时若 `\n` 恰在块边界之后，半行残留会导致后续消息**永久错位**（事件静默丢失，且首条错误对不上号）。修复：read 侧留 `_read_buf` 拼半行，`split(b"\n")` 前先把 buf 与残留拼接，末尾无 `\n` 的残段留到下轮。
+
 
 ## 6. 验证手段（可复用）
 
