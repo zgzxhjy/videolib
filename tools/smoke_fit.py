@@ -62,22 +62,27 @@ def rect(hwnd):
     ctypes.WinDLL("user32").GetWindowRect(hwnd, ctypes.byref(r))
     return r.right - r.left, r.bottom - r.top
 
+def expected_phys(widget):
+    dpr = widget.devicePixelRatio()
+    return int(widget.width() * dpr), int(widget.height() * dpr)
+
 def check_land():
     ww, wh = w.width(), w.height()
     child = w.video_widget.child_hwnd()
     cw, ch = rect(child)
-    print(f"land: window={ww}x{wh} child={cw}x{ch} widget={w.video_widget.width()}x{w.video_widget.height()}", flush=True)
+    ew, eh = expected_phys(w.video_widget)
+    print(f"land: window={ww}x{wh} child={cw}x{ch} widget={w.video_widget.width()}x{w.video_widget.height()} dpr={w.devicePixelRatio()} expected_phys={ew}x{eh}", flush=True)
     assert ww > wh, "landscape video must open landscape window"
-    assert cw == w.video_widget.width() and ch == w.video_widget.height(), \
-        "child hwnd must match video widget size"
+    assert (cw, ch) == (ew, eh), \
+        "child hwnd physical size must equal widget logical size x dpr"
     w.resize(ww + 200, wh + 100)
     QTimer.singleShot(400, check_child_follows)
 
 def check_child_follows():
     cw, ch = rect(w.video_widget.child_hwnd())
-    print(f"after resize: widget={w.video_widget.width()}x{w.video_widget.height()} child={cw}x{ch}", flush=True)
-    assert cw == w.video_widget.width() and ch == w.video_widget.height(), \
-        "child hwnd must follow window resize"
+    ew, eh = expected_phys(w.video_widget)
+    print(f"after resize: widget={w.video_widget.width()}x{w.video_widget.height()} child={cw}x{ch} expected_phys={ew}x{eh}", flush=True)
+    assert (cw, ch) == (ew, eh), "child hwnd must follow window resize (physical px)"
     w.btn_next.click()
     QTimer.singleShot(400, check_port)
 

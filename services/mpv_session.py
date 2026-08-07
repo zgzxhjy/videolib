@@ -121,6 +121,7 @@ class MpvIpcClient:
         self._handle = None
         self._lock = threading.Lock()
         self._pending_lines: list[str] = []
+        self._read_buf = b""
 
     def connect(self, timeout_ms: int = 5000) -> "MpvIpcClient":
         """轮询等待 mpv 建好 named pipe。
@@ -156,6 +157,8 @@ class MpvIpcClient:
 
         同步 ReadFile 阻塞时, 同一句柄上另一线程的 WriteFile 会卡死,
         因此读侧必须永远不阻塞 —— 用 PeekNamedPipe 探测, 有数据才读。
+        pipe 是字节流, 单次 Read 可能落在消息中间: 半行留在 _read_buf,
+        与下次数据拼成完整行, 绝不丢弃(丢弃会永久错位, 事件丢失)。
         """
         while self._pending_lines:
             line = self._pending_lines.pop(0)
@@ -176,16 +179,22 @@ class MpvIpcClient:
                                      ctypes.byref(read), None)
         if not ok or read.value == 0:
             return None
-        text = buf.raw[:read.value].decode("utf-8", "replace")
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines:
+        self._read_buf += buf.raw[:read.value]
+        lines = self._read_buf.split(b"\n")
+        self._read_buf = lines.pop()  # 最后一段可能是不完整的半行, 保留
+        decoded = []
+        for raw in lines:
+            text = raw.decode("utf-8", "replace").strip()
+            if text:
+                decoded.append(text)
+        if not decoded:
             return None
         try:
-            return json.loads(lines[0])
+            return json.loads(decoded[0])
         except json.JSONDecodeError:
             return None
         finally:
-            self._pending_lines.extend(lines[1:])
+            self._pending_lines.extend(decoded[1:])
 
     def close(self) -> None:
         if self._handle and self._handle != wt.HANDLE(-1).value:
@@ -304,12 +313,11 @@ class MpvSession(QObject):
     # ---------- control ----------
 
     def load(self, path: str, resume_sec: float = 0.0) -> None:
-        options = {}
-        if resume_sec > 0.0:
-            options["start"] = round(resume_sec, 3)
         cmd: list = ["loadfile", path, "replace"]
-        if options:
-            cmd.append(options)
+        if resume_sec > 0.0:
+            # mpv 0.38+ 签名: loadfile <url> [flags [index [options]]];
+            # options 必须用 -1 占 index 位, 且值必须是字符串。
+            cmd += [-1, {"start": f"{round(resume_sec, 3)}"}]
         self._send(cmd)
 
     def play(self) -> None:
@@ -365,34 +373,40 @@ class MpvSession(QObject):
             msg = self._ipc.read()
             if msg is None:
                 continue
-            event = msg.get("event")
-            if event == "end-file":
-                reason = msg.get("reason")
-                if reason == "eof":
-                    self.endOfMedia.emit()
-            elif event == "file-loaded":
-                self._send(["observe_property", 1, "duration"])
-                self._send(["observe_property", 2, "time-pos"])
-                self._send(["observe_property", 3, "pause"])
-                self.mediaStatusChanged.emit("loaded")
-            elif event == "property-change":
-                name = msg.get("name")
-                if name == "duration":
-                    data = msg.get("data")
-                    if isinstance(data, (int, float)):
-                        self._duration = int(data * 1000)
-                        self.durationChanged.emit(self._duration)
-                elif name == "time-pos":
-                    data = msg.get("data")
-                    if isinstance(data, (int, float)) and not isinstance(data, bool):
-                        now = time.monotonic()
-                        if now - self._last_emit >= 0.1:
-                            self._last_emit = now
-                            self._position = int(data * 1000)
-                            self.positionChanged.emit(self._position)
-                elif name == "pause":
-                    self._state = "paused" if msg.get("data") else "playing"
-                    self.stateChanged.emit(self._state)
+            self._dispatch(msg)
+
+    def _dispatch(self, msg: dict) -> None:
+        event = msg.get("event")
+        if event == "end-file":
+            reason = msg.get("reason")
+            if reason == "eof":
+                self.endOfMedia.emit()
+        elif event == "file-loaded":
+            self._send(["observe_property", 1, "duration"])
+            self._send(["observe_property", 2, "time-pos"])
+            self._send(["observe_property", 3, "pause"])
+            self.mediaStatusChanged.emit("loaded")
+        elif event == "property-change":
+            name = msg.get("name")
+            if name == "duration":
+                data = msg.get("data")
+                if isinstance(data, (int, float)):
+                    self._duration = int(data * 1000)
+                    self.durationChanged.emit(self._duration)
+            elif name == "time-pos":
+                data = msg.get("data")
+                if isinstance(data, (int, float)) and not isinstance(data, bool):
+                    now = time.monotonic()
+                    if now - self._last_emit >= 0.1:
+                        self._last_emit = now
+                        self._position = int(data * 1000)
+                        self.positionChanged.emit(self._position)
+            elif name == "pause":
+                self._state = "paused" if msg.get("data") else "playing"
+                self.stateChanged.emit(self._state)
+        elif "error" in msg and msg.get("error") != "success":
+            # 命令响应报错(如 loadfile 被拒): 不再静默, 让 UI 可见。
+            self.mediaStatusChanged.emit("error")
 
     def _poll_state(self) -> None:
         pass

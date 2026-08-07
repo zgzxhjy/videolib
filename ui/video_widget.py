@@ -21,17 +21,21 @@ class VideoWidget(QWidget):
     def ensure_child(self) -> int:
         if not self._child:
             self._child = _child_hwnd(int(self.winId()), 0, 0,
-                                      max(1, self.width()), max(1, self.height()))
+                                      *self._pixel_size())
         return self._child
 
     def child_hwnd(self) -> int:
         return self._child
 
+    def _pixel_size(self) -> tuple[int, int]:
+        """容器尺寸换算成物理像素(Win32 坐标)。Qt 是逻辑像素, 125% 屏必须乘 dpr。"""
+        dpr = self.devicePixelRatio()
+        return max(1, int(self.width() * dpr)), max(1, int(self.height() * dpr))
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if self._child:
-            _set_child_rect(self._child, 0, 0,
-                            max(1, self.width()), max(1, self.height()))
+            _set_child_rect(self._child, 0, 0, *self._pixel_size())
 
     def closeEvent(self, event) -> None:
         if self._child:
