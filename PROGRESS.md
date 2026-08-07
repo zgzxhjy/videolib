@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-07（会话 10：播放器黑边错位/断点无法播放修复——DPI 物理像素 + loadfile 新签名，坑 #28-30）
+> 最后更新：2026-08-07（会话 11：删除历史目录后台化 + 进度对话框 + 中断自愈，坑 #31-32）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -107,6 +107,8 @@ build.bat                               # 打包 → dist\VideoLib.exe
 28. **mpv 0.38+ `loadfile` 签名变化（断点续播失效）**：签名变为 `loadfile <url> [flags [index [options]]]`——options 是第 4 参，**必须用 `-1` 占位 index**；旧格式 `["loadfile", path, "replace", {"start": 5.0}]` 把 dict 顶到 index 位 → 报 `Command loadfile: argument index has incompatible type` → **加载被拒、黑屏且无任何 UI 报错**（44 个会话日志中 13 个命中，恰是带断点的视频，~30% 概率复现）。修复：`resume>0` 时发 `["loadfile", path, "replace", -1, {"start": f"{round(resume,3)}"}]`（options 为 map 可接受，但**值必须是字符串**，`{"start": 5}` 同样 invalid）。铁律：**loadfile 带 options 必须显式 `-1` 占位 + 值字符串化**。
 29. **Win32 子窗口尺寸必须物理像素**：`CreateWindowExW`/`SetWindowPos` 用物理坐标，而 Qt 的 `resize()`/geometry 是逻辑像素。125% 缩放屏（mpv 日志 `DPI detected from the new API: 120`）上直接用逻辑尺寸建 child → child 只有容器的 80%（956x496 vs 应有 1195x620）→ **画面贴左上角、右边/下方大段空白**（mpv 渲染区 = child 物理尺寸，跟随 resize 正常，问题只在建窗尺寸）。修复：`ensure_child`/`resizeEvent` 尺寸乘 `devicePixelRatio()`。
 30. **named pipe 字节流会被 4096 块切半行**：按行拆分时若 `\n` 恰在块边界之后，半行残留会导致后续消息**永久错位**（事件静默丢失，且首条错误对不上号）。修复：read 侧留 `_read_buf` 拼半行，`split(b"\n")` 前先把 buf 与残留拼接，末尾无 `\n` 的残段留到下轮。
+31. **删除历史目录（删除并清除数据）曾是 UI 线程同步执行**：整库备份 + 删行 + 逐文件删缩略图，大目录冻结几十秒无反馈；中途退出会留下 FTS 索引残留（行已删但搜索仍显示幽灵条目）且无入口再清理。修复：**DeleteWorker(QThread) + 进度对话框（同扫描样式，可取消）**，scan_root 记录**最后一步才删**——root 记录是「可重试标记」，中断/取消后重新选择即可幂等清完。配套两个自愈：①启动时 `_heal_fts`（videos 与 videos_fts COUNT 不一致则重建，杜绝搜索幽灵条目）；②孤儿缩略图清理原有逻辑兜底。
+32. **PyQt6 信号有类型强校验**：`pyqtSignal(int, int, str)` 上 emit `Path`（不是 str）直接抛 TypeError，且若在 worker 的 `except Exception` 里被吞掉 → 任务「成功结束」但阶段没跑完，无任何迹象（实测 root_removed 变 False、进度条无更新）。铁律：**emit 前显式 `str()`**；worker 的 except 分支必须发独立 `error` 信号让 UI 可见，不能只用 message。
 
 
 ## 6. 验证手段（可复用）

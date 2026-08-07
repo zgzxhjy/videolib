@@ -205,13 +205,23 @@ class Thumbnailer:
                 pass
         return removed
 
-    def delete_for(self, ids) -> int:
-        """Delete thumbnails for deleted videos so their ids can never be reused."""
+    def delete_for(self, ids, progress=None, should_cancel=None) -> int:
+        """Delete thumbnails for deleted videos so their ids can never be reused.
+
+        progress(done, total) is called per file so callers can show a bar;
+        should_cancel() stops the loop early when truthy (leftover files are
+        picked up by the startup orphan cleanup).
+        """
         removed = 0
-        for video_id in ids:
+        total = len(ids)
+        for i, video_id in enumerate(ids, 1):
+            if should_cancel is not None and should_cancel():
+                break
             try:
                 self.path_for(video_id).unlink()
                 removed += 1
             except OSError:
                 pass
+            if progress is not None:
+                progress(i, total)
         return removed

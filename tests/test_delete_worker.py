@@ -1,0 +1,189 @@
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+
+from domain.repository import Repository
+from services.metadata import build_video
+from services.thumbnailer import Thumbnailer
+from ui.delete_worker import DeleteWorker
+
+
+def _make_test_video(path: Path, seconds: int = 1) -> Path:
+    """Generate a tiny real video file using PyAV (mpeg4, 64x48)."""
+    import av
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("mpeg4", rate=10)
+        stream.width = 64
+        stream.height = 48
+        stream.pix_fmt = "yuv420p"
+        for i in range(seconds * 10):
+            frame = av.VideoFrame(64, 48, "yuv420p")
+            for plane in frame.planes:
+                plane.update(bytes([i % 256]) * plane.buffer_size)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return path
+
+
+def _thumb(thumbs_dir: Path, video_id: int) -> Path:
+    return Thumbnailer(thumbs_dir).path_for(video_id)
+
+
+def _wait_for(predicate, timeout=10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture()
+def repo(tmp_path):
+    r = Repository(tmp_path / "db.sqlite")
+    yield r
+    r.close()
+
+
+def _drain(qapp) -> None:
+    """Deliver queued cross-thread signal calls to their slots."""
+    for _ in range(50):
+        qapp.processEvents()
+
+
+def _setup(tmp_path, repo, n=3):
+    root = tmp_path / "root"
+    other = tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    files = [_make_test_video(root / f"v{i}.mp4") for i in range(n)]
+    keep = _make_test_video(other / "keep.mp4")
+    repo.upsert_videos([build_video(str(f)) for f in files] + [build_video(str(keep))])
+    repo.register_scan(str(root))
+    repo.register_scan(str(other))
+    videos = [repo.get_by_path(str(f)) for f in files]
+    thumbs_dir = tmp_path / "thumbs"
+    for v in videos:
+        _thumb(thumbs_dir, v.id).write_bytes(b"x")
+    return root, other, files, keep, thumbs_dir, videos
+
+
+def test_delete_worker_completes(qapp, tmp_path, repo):
+    root, other, files, keep, thumbs_dir, videos = _setup(tmp_path, repo)
+    events: list[tuple[int, bool]] = []
+    worker = DeleteWorker(str(root), repo, thumbs_dir=thumbs_dir)
+    worker.done.connect(lambda deleted, removed: events.append((deleted, removed)))
+    worker.start()
+    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    _drain(qapp)
+    assert events == [(3, True)]
+    assert repo.get_by_path(str(files[0])) is None
+    assert repo.get_by_path(str(keep)) is not None, "other root must survive"
+    assert str(root) not in repo.get_scan_roots()
+    assert str(other) in repo.get_scan_roots()
+    for v in videos:
+        assert not _thumb(thumbs_dir, v.id).exists(), "thumb must die with its row"
+
+    import config
+
+    assert list(config.BACKUPS_DIR.glob("videolib-*.db")), "must snapshot first"
+
+
+def test_delete_worker_cancel_keeps_root_for_retry(qapp, tmp_path, repo, monkeypatch):
+    root, other, files, keep, thumbs_dir, videos = _setup(tmp_path, repo)
+    import ui.delete_worker as dw
+
+    holder: dict = {}
+
+    def fake_backup(repo, force):
+        holder["worker"].cancel()
+
+    monkeypatch.setattr(dw, "backup_db", fake_backup)
+    events: list[tuple[int, bool]] = []
+    worker = DeleteWorker(str(root), repo, thumbs_dir=thumbs_dir)
+    holder["worker"] = worker
+    worker.done.connect(lambda deleted, removed: events.append((deleted, removed)))
+    worker.start()
+    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    _drain(qapp)
+    assert events == [(3, False)]
+    assert repo.get_by_path(str(files[0])) is None
+    assert str(root) in repo.get_scan_roots(), "root must stay selectable after cancel"
+    assert _thumb(thumbs_dir, videos[0].id).exists(), "thumbs must survive cancel"
+
+
+def test_delete_worker_reports_progress(qapp, tmp_path, repo):
+    root, other, files, keep, thumbs_dir, videos = _setup(tmp_path, repo)
+    progress: list[tuple[int, int]] = []
+    worker = DeleteWorker(str(root), repo, thumbs_dir=thumbs_dir)
+    worker.progress.connect(lambda done, total, fp: progress.append((done, total)))
+    worker.start()
+    assert _wait_for(lambda: worker.isFinished()), "worker did not finish"
+    _drain(qapp)
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_delete_for_progress_and_cancel(tmp_path):
+    thumbs_dir = tmp_path / "thumbs"
+    ids = [10, 20, 30]
+    for i in ids:
+        _thumb(thumbs_dir, i).write_bytes(b"x")
+
+    t = Thumbnailer(thumbs_dir)
+    progress: list[tuple[int, int]] = []
+    assert t.delete_for(ids, progress=lambda d, total: progress.append((d, total))) == 3
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+
+    for i in ids:
+        _thumb(thumbs_dir, i).write_bytes(b"x")
+    progress.clear()
+    removed = t.delete_for(
+        ids,
+        progress=lambda d, total: progress.append((d, total)),
+        should_cancel=lambda: len(progress) >= 1,
+    )
+    assert removed == 1, "loop must stop once should_cancel turns true"
+    assert not _thumb(thumbs_dir, 10).exists()
+    assert _thumb(thumbs_dir, 20).exists()
+
+
+def test_fts_heal_on_open(tmp_path):
+    """A kill between row deletion and FTS rebuild leaves a stale index;
+    opening the repo must rebuild it so search shows no ghosts."""
+    db = tmp_path / "db.sqlite"
+    r = Repository(db)
+    f1 = _make_test_video(tmp_path / "a.mp4")
+    f2 = _make_test_video(tmp_path / "b.mp4")
+    r.upsert_videos([build_video(str(f1)), build_video(str(f2))])
+    r.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM videos WHERE id = (SELECT MIN(id) FROM videos)")
+    conn.commit()
+    conn.close()
+
+    r2 = Repository(db)
+    try:
+        with r2._lock:
+            fts = r2._conn.execute("SELECT COUNT(*) AS c FROM videos_fts").fetchone()["c"]
+        assert fts == 1, "stale index must be rebuilt on open"
+        assert r2.search("b", limit=10), "survivor must stay findable"
+    finally:
+        r2.close()

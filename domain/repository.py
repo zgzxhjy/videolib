@@ -121,6 +121,7 @@ class Repository:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
             self._migrate()
+            self._heal_fts()
             self._conn.commit()
 
     def _migrate(self) -> None:
@@ -165,6 +166,24 @@ class Repository:
             self._conn.execute("DROP TABLE favorites")
         if not self._play_history_deduped():
             self._dedupe_play_history()
+
+    def _heal_fts(self) -> None:
+        """Rebuild the FTS index if it drifted from the videos table.
+
+        A kill during a destructive write can leave the index stale while
+        the rows are already gone, which would keep deleted videos visible
+        in search forever. Both COUNTs are cheap; rebuild happens only on
+        mismatch.
+        """
+        try:
+            videos = self._conn.execute("SELECT COUNT(*) AS c FROM videos").fetchone()["c"]
+            indexed = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM videos_fts"
+            ).fetchone()["c"]
+        except sqlite3.Error:
+            return
+        if videos != indexed:
+            self._sync_fts()
 
     def _play_history_deduped(self) -> bool:
         rows = self._conn.execute("PRAGMA index_list('play_history')").fetchall()

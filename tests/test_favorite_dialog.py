@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -29,6 +30,15 @@ def _mk_video(repo, filepath):
     from domain.models import Video
 
     repo.upsert_videos([Video(filename=Path(filepath).name, filepath=filepath)])
+
+
+def _wait_for(predicate, timeout=10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_pick_favorite_list_lists_all(qapp, fav_env):
@@ -155,9 +165,14 @@ def test_pick_scan_root_dialog(qapp, fav_env, monkeypatch):
     assert r"D:\b" not in fav_env.get_scan_roots()
     assert fav_env.get_by_path(r"D:\a\a.mp4") is not None
 
-    # delete D:\a together with its data
+    # delete D:\a together with its data (background worker)
     dialog.list.setCurrentRow(0)
     dialog._delete_with_data()
+    assert _wait_for(
+        lambda: dialog._worker is not None and dialog._worker.isFinished()
+    ), "delete worker did not finish"
+    for _ in range(20):
+        qapp.processEvents()
     assert dialog.deleted_roots == [r"D:\b", r"D:\a"]
     assert fav_env.get_scan_roots() == []
     assert fav_env.get_by_path(r"D:\a\a.mp4") is None
