@@ -266,12 +266,11 @@ class MpvSession(QObject):
         if self._started:
             return
         self._started = True
-        parent_hwnd = int(self._parent_widget.winId())
-        self._child_hwnd = _child_hwnd(parent_hwnd, 0, 0,
-                                       max(1, self._parent_widget.width()),
-                                       max(1, self._parent_widget.height()))
+        # 子窗口由 VideoWidget 单一所有(创建/resize 同步/销毁);
+        # 这里只取句柄, 保证 mpv 渲染窗口与容器同步。
+        self._child_hwnd = self._parent_widget.ensure_child()
         if not self._child_hwnd:
-            raise OSError("_child_hwnd failed: CreateWindowExW returned 0")
+            raise OSError("ensure_child failed: CreateWindowExW returned 0")
         self._pipe = f"{PIPE_PREFIX}_{self._pid}"
         self._process = MpvProcess(self._child_hwnd, self._pipe)
         self._process.start()
@@ -352,10 +351,6 @@ class MpvSession(QObject):
 
     def child_hwnd(self) -> int:
         return self._child_hwnd
-
-    def resize(self, width: int, height: int) -> None:
-        if self._child_hwnd:
-            _set_child_rect(self._child_hwnd, 0, 0, max(1, width), max(1, height))
 
     # ---------- internals ----------
 

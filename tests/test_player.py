@@ -373,3 +373,57 @@ def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
         assert w.btn_loop.text() == "循环:关", "L must cycle loop modes"
     finally:
         w.close()
+
+
+def _mk_res(player_env, name, path, resolution):
+    from domain.models import Video
+
+    player_env.upsert_videos([Video(filename=name, filepath=path, resolution=resolution)])
+    return player_env.get_by_path(path)
+
+
+def test_fit_window_landscape_by_resolution(qapp, player_env, fake_player):
+    from ui.player import PlayerWindow
+
+    a = _mk_res(player_env, "a.mp4", r"D:\v\land.mp4", "1920x1080")
+    w = PlayerWindow(a, player_env)
+    try:
+        assert w.width() > w.height(), "16:9 video must open a landscape window"
+    finally:
+        w.close()
+
+
+def test_fit_window_portrait_by_resolution(qapp, player_env, fake_player):
+    from ui.player import PlayerWindow
+
+    a = _mk_res(player_env, "a.mp4", r"D:\v\port.mp4", "720x1280")
+    w = PlayerWindow(a, player_env)
+    try:
+        assert w.width() < w.height(), "9:16 video must open a portrait window"
+    finally:
+        w.close()
+
+
+def test_fit_window_fallback_without_resolution(qapp, player_env, fake_player):
+    from ui.player import PlayerWindow
+
+    a = _mk_res(player_env, "a.mp4", r"D:\v\nores.mp4", None)
+    w = PlayerWindow(a, player_env)
+    try:
+        assert w.width() > w.height(), "missing resolution must fall back to 16:9"
+    finally:
+        w.close()
+
+
+def test_fit_window_adapts_on_switch(qapp, player_env, fake_player):
+    from ui.player import PlayerWindow
+
+    a = _mk_res(player_env, "a.mp4", r"D:\v\land.mp4", "1920x1080")
+    b = _mk_res(player_env, "b.mp4", r"D:\v\port.mp4", "720x1280")
+    w = PlayerWindow(a, player_env, queue=[a, b])
+    try:
+        assert w.width() > w.height(), "first video is landscape"
+        w.btn_next.click()
+        assert w.width() < w.height(), "switching must re-fit to portrait ratio"
+    finally:
+        w.close()

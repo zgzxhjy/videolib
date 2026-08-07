@@ -1,5 +1,6 @@
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -50,7 +51,7 @@ class PlayerWindow(QWidget):
         self._loop_mode = 0  # 0 off, 1 single, 2 all
 
         self.setWindowTitle(self._video.filename)
-        self.resize(960, 560)
+        self._fit_size(self._video)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.video_widget = VideoWidget()
@@ -119,6 +120,7 @@ class PlayerWindow(QWidget):
         self._queue_index = index
         self._video = self._queue[index]
         self.setWindowTitle(self._video.filename)
+        self._fit_size(self._video)
         self._resume_pos = 0.0
         resume = self._repo.last_position(self._video.id)
         if resume > 5.0 and (self._video.duration is None or resume < self._video.duration * 0.9):
@@ -127,6 +129,28 @@ class PlayerWindow(QWidget):
         self._resume_pos = 0.0
         self.time_label.setText("00:00 / 00:00")
         self._update_nav_buttons()
+
+    def _fit_size(self, video: Video) -> None:
+        """按视频宽高比自适应窗口尺寸(面积守恒 + 屏幕 clamp)。
+
+        resolution 形如 "1920x1080"; 缺失/坏格式回退默认 960x560。
+        """
+        area = 960 * 560
+        try:
+            vw, vh = (int(x) for x in video.resolution.lower().split("x"))
+        except (AttributeError, ValueError):
+            vw, vh = 16, 9
+        if vw <= 0 or vh <= 0:
+            vw, vh = 16, 9
+        ratio = vw / vh
+        w = int(round((area * ratio) ** 0.5))
+        h = int(round(w / ratio))
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            w = min(w, int(avail.width() * 0.85))
+            h = min(h, int(avail.height() * 0.85))
+        self.resize(max(1, w), max(1, h))
 
     def _prev(self) -> None:
         if self._queue_index > 0:
