@@ -1,8 +1,9 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 .pytest_cache/
 build/
 dist/
 *.spec
+!VideoLib.spec
 .venv/
 vendor/
