@@ -319,6 +319,9 @@ class MpvSession(QObject):
             # options 必须用 -1 占 index 位, 且值必须是字符串。
             cmd += [-1, {"start": f"{round(resume_sec, 3)}"}]
         self._send(cmd)
+        # keep-open 在 EOF 时把 pause 置 yes, 且 loadfile 会继承该暂停状态
+        # (mpv 不会自动取消) —— 约定: load 即以播放态启动, 显式取消暂停。
+        self._send(["set", "pause", "no"])
 
     def play(self) -> None:
         self._send(["set", "pause", "no"])
@@ -385,6 +388,9 @@ class MpvSession(QObject):
             self._send(["observe_property", 1, "duration"])
             self._send(["observe_property", 2, "time-pos"])
             self._send(["observe_property", 3, "pause"])
+            # keep-open=yes 下 EOF 不发 end-file(eof) 事件(实测 mpv 0.41),
+            # 只发 eof-reached=True 属性变更 —— 这是自然播完的唯一信号。
+            self._send(["observe_property", 4, "eof-reached"])
             self.mediaStatusChanged.emit("loaded")
         elif event == "property-change":
             name = msg.get("name")
@@ -404,6 +410,9 @@ class MpvSession(QObject):
             elif name == "pause":
                 self._state = "paused" if msg.get("data") else "playing"
                 self.stateChanged.emit(self._state)
+            elif name == "eof-reached":
+                if msg.get("data") is True:
+                    self.endOfMedia.emit()
         elif "error" in msg and msg.get("error") != "success":
             # 命令响应报错(如 loadfile 被拒): 不再静默, 让 UI 可见。
             self.mediaStatusChanged.emit("error")

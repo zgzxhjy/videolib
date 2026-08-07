@@ -29,6 +29,7 @@ class FakeSession(QObject):
 
     def load(self, path, resume_sec=0.0):
         self.loads.append((path, resume_sec))
+        self.state = "playing"  # MpvSession contract: load always starts playing
 
     def play(self):
         self.state = "playing"
@@ -160,6 +161,21 @@ def test_esc_closes_and_records_position(qapp, repo, fake_player):
     QTest.keyClick(w, Qt.Key.Key_Escape)
     assert not w.isVisible(), "Esc must close the player"
     assert repo.last_position(a.id) == 60.0
+
+
+def test_play_button_syncs_with_session_state(qapp, repo, fake_player):
+    _ensure_video(repo)
+    w = _window(repo)
+    try:
+        assert w.btn_play.text() == "暂停", "a freshly loaded video is playing"
+        w.session.stateChanged.emit("paused")
+        assert w.btn_play.text() == "播放", "EOF/keep-open pause must flip the label"
+        w.session.stateChanged.emit("playing")
+        assert w.btn_play.text() == "暂停"
+        w.session.stateChanged.emit("stopped")
+        assert w.btn_play.text() == "播放"
+    finally:
+        w.close()
 
 
 def test_rate_button_cycles_and_r_key(qapp, repo, fake_player):

@@ -106,6 +106,7 @@ class PlayerWindow(QWidget):
         self.session.durationChanged.connect(lambda _d: self._refresh_label())
         self.session.mediaStatusChanged.connect(self._on_status)
         self.session.endOfMedia.connect(self._on_end)
+        self.session.stateChanged.connect(self._sync_play_button)
 
         self._start()
         self.setFocus()
@@ -171,6 +172,14 @@ class PlayerWindow(QWidget):
         else:
             self.session.play()
             self.btn_play.setText("暂停")
+
+    def _sync_play_button(self, state: str) -> None:
+        """Keep the button label truthful to mpv's actual pause state.
+
+        The keep-open EOF pause arrives as an async property-change; without
+        this sync the button could read 暂停 while mpv is really paused.
+        """
+        self.btn_play.setText("暂停" if state == _PLAYING else "播放")
 
     def _cycle_rate(self) -> None:
         self._rate_idx = (self._rate_idx + 1) % len(self.RATES)

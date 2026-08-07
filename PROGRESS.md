@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-07（会话 14：设置对话框 + 手动主题切换，坑 #34）
+> 最后更新：2026-08-07（会话 15：修复播放器 EOF 事件——循环/自动续播失效 + 下一集卡住，坑 #35）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,7 +9,7 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，198 个用例全绿
+- 测试：pytest，202 个用例全绿
 - git：44 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）
@@ -113,6 +113,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 32. **PyQt6 信号有类型强校验**：`pyqtSignal(int, int, str)` 上 emit `Path`（不是 str）直接抛 TypeError，且若在 worker 的 `except Exception` 里被吞掉 → 任务「成功结束」但阶段没跑完，无任何迹象（实测 root_removed 变 False、进度条无更新）。铁律：**emit 前显式 `str()`**；worker 的 except 分支必须发独立 `error` 信号让 UI 可见，不能只用 message。
 33. **换机兼容性两个坑**：①`restoreGeometry` 会把别的分辨率/显示器布局下保存的几何原样恢复——整窗开在屏幕外且无把手拖回（player 的 `_fit_size` 有 clamp，主窗口没有）。修复：恢复后若 `frameGeometry` 与任何屏幕的 `availableGeometry` 无交集 → 移到所在屏中央。②扫描根是绝对路径（含盘符），换机/换盘后全部失效；之前只有 watcher 静默跳过。修复：启动 0ms 定时器检查 `_missing_scan_roots()`，非空弹非模态警告（`QMessageBox.open()` 而非静态 `warning()`——后者嵌套 exec 会卡住测试，且打开即被其他测试的 `processEvents` 触发）。测试注意：`register_scan` 会 normpath（正斜杠变反斜杠），断言必须 `os.path.normpath`。
 34. **主题切换测试不能对 session QApplication 调 `setStyleSheet`**：全量跑测试时前面的用例留下大量未销毁 widget（引用环/延迟 GC），`apply_theme` → `app.setStyleSheet` 会重刷整棵 widget 树，碰到半拆除对象 → access violation（单独跑 test_settings_dialog 不崩、全量必崩）。修复：测试 patch 掉 `apply_theme` 只验证「被调用 + 设置已写」，settings→qss 的映射交给 test_theme 纯函数覆盖。生产代码正常（应用内 widget 树健康）。另：主题三态 `system`/`light`/`dark`，`app_qss(app, scheme=None)` 显式参数 > 设置 > 系统检测；`backup_keep` 设置化后 `_rotate` 默认参数从常量改为读 settings（默认 5 不变）。
+35. **keep-open 下的 EOF 信号跟 mpv 版本走（实测 mpv v0.41.0-744）**：`--keep-open=yes` 时自然播完**不发 `end-file(reason=eof)`**，只发 `pause=True` + `eof-reached=True` 两个属性变更（`end-file stop` 只在被 loadfile 打断时发）——原代码只认 end-file(eof)，导致 `endOfMedia` 永不触发：单曲/全部循环、队列自动续播全部失效，视频停最后一帧。另发现第二个坑：**loadfile 继承当前 pause 状态**（keep-open 在 EOF 置了 pause=yes，新加载的视频以暂停态启动 → 「卡住」，连点两下暂停是按钮文案与异步属性变更不同步的假象）。修复三件套：①file-loaded 时 `observe_property 4 eof-reached`，`data is True` → emit endOfMedia（False/None 忽略——新文件加载时 eof-reached 会短暂变 None）；②`MpvSession.load` 末尾显式 `set pause no`，约定「load 即以播放态启动」（实测：set pause no + loadfile 正常播放）；③`PlayerWindow` 连接 stateChanged 同步播放按钮文案。用真实 mpv + named pipe 实证（lavfi:// 协议没编译进构建，改用 pytest 残留的 1s 测试视频），另：测试视频残留 `%TEMP%\pytest-of-Administrator\**\v0.mp4`。
 
 
 ## 6. 验证手段（可复用）

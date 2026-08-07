@@ -17,7 +17,8 @@ def test_load_without_resume_keeps_old_format(qapp):
     calls = []
     s._send = lambda cmd: calls.append(cmd)
     s.load(r"D:\v\a.mp4")
-    assert calls == [["loadfile", r"D:\v\a.mp4", "replace"]]
+    assert calls == [["loadfile", r"D:\v\a.mp4", "replace"],
+                     ["set", "pause", "no"]], "load must start playing (keep-open EOF pause)"
 
 
 def test_load_with_resume_uses_index_placeholder_and_string_value(qapp):
@@ -30,6 +31,7 @@ def test_load_with_resume_uses_index_placeholder_and_string_value(qapp):
     # mpv 0.38+: options 必须用 -1 占 index 位, 值必须是字符串
     assert cmd[3] == -1
     assert isinstance(cmd[4], dict) and cmd[4]["start"] == "5.032"
+    assert calls[1] == ["set", "pause", "no"], "resume load must also start playing"
 
 
 class _FakePipe:
@@ -94,3 +96,32 @@ def test_dispatch_emits_error_on_command_response(qapp):
     assert statuses == ["error"]
     s._dispatch({"request_id": 8, "error": "success"})
     assert statuses == ["error"], "success response must stay silent"
+
+
+def test_file_loaded_observes_eof_reached(qapp):
+    s = _session(qapp)
+    calls = []
+    s._send = lambda cmd: calls.append(cmd)
+    loaded = []
+    s.mediaStatusChanged.connect(lambda st: loaded.append(st))
+    s._dispatch({"event": "file-loaded"})
+    assert calls[-1] == ["observe_property", 4, "eof-reached"], \
+        "keep-open 不发 end-file(eof), eof-reached 是唯一 EOF 信号"
+    assert loaded == ["loaded"]
+
+
+def test_eof_reached_true_emits_end_of_media(qapp):
+    s = _session(qapp)
+    eof = []
+    s.endOfMedia.connect(lambda: eof.append(1))
+    s._dispatch({"event": "property-change", "name": "eof-reached", "data": True})
+    assert eof == [1], "eof-reached=True is the keep-open EOF signal"
+
+
+def test_eof_reached_false_and_none_are_ignored(qapp):
+    s = _session(qapp)
+    eof = []
+    s.endOfMedia.connect(lambda: eof.append(1))
+    s._dispatch({"event": "property-change", "name": "eof-reached", "data": False})
+    s._dispatch({"event": "property-change", "name": "eof-reached", "data": None})
+    assert not eof, "file load resets eof-reached via False/None, must not fire"
