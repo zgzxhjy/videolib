@@ -32,17 +32,26 @@ def _default_mpv_exe() -> str:
     return os.path.join(here, "vendor", "mpv", "mpv.exe")
 
 
-def _child_hwnd(parent_hwnd: int, left: int, top: int, width: int, height: int) -> int:
-    """在 Qt 容器窗口内创建承载 mpv 渲染的子窗口, 返回 HWND。"""
-    user32 = ctypes.WinDLL("user32")
-    kernel32 = ctypes.WinDLL("kernel32")
+_WNDPROC = None
+_WNDCLASS_REGISTERED = False
 
-    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+def _wndproc(hwnd, msg, wp, lp):
+    user32 = ctypes.WinDLL("user32")
     user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
     user32.DefWindowProcW.restype = ctypes.c_longlong
+    return user32.DefWindowProcW(hwnd, msg, wp, lp)
 
-    def wndproc(hwnd, msg, wp, lp):
-        return user32.DefWindowProcW(hwnd, msg, wp, lp)
+
+def _child_hwnd(parent_hwnd: int, left: int, top: int, width: int, height: int) -> int:
+    """在 Qt 容器窗口内创建承载 mpv 渲染的子窗口, 返回 HWND。
+
+    窗口过程必须是模块级函数且 WNDPROC 对象必须被模块级持有:
+    cast 只拷贝裸指针, 引用一旦 GC, 窗口回调就是悬垂指针(access violation)。
+    """
+    global _WNDPROC, _WNDCLASS_REGISTERED
+    user32 = ctypes.WinDLL("user32")
+    kernel32 = ctypes.WinDLL("kernel32")
 
     class WNDCLASS(ctypes.Structure):
         _fields_ = [("style", wt.UINT), ("lpfnWndProc", ctypes.c_void_p),
@@ -52,13 +61,17 @@ def _child_hwnd(parent_hwnd: int, left: int, top: int, width: int, height: int) 
                     ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
 
     cls = "VideoLibMpvChild"
-    wc = WNDCLASS()
-    wc.lpfnWndProc = ctypes.cast(WNDPROC(wndproc), ctypes.c_void_p)
-    wc.hInstance = kernel32.GetModuleHandleW(None)
-    wc.lpszClassName = cls
-    user32.RegisterClassW.argtypes = [ctypes.c_void_p]
-    user32.RegisterClassW.restype = wt.ATOM
-    user32.RegisterClassW(ctypes.byref(wc))
+    if not _WNDCLASS_REGISTERED:
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+        _WNDPROC = WNDPROC(_wndproc)
+        wc = WNDCLASS()
+        wc.lpfnWndProc = ctypes.cast(_WNDPROC, ctypes.c_void_p)
+        wc.hInstance = kernel32.GetModuleHandleW(None)
+        wc.lpszClassName = cls
+        user32.RegisterClassW.argtypes = [ctypes.c_void_p]
+        user32.RegisterClassW.restype = wt.ATOM
+        user32.RegisterClassW(ctypes.byref(wc))
+        _WNDCLASS_REGISTERED = True
     user32.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
                                        ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                        ctypes.c_int, wt.HWND, wt.HMENU,
@@ -66,7 +79,7 @@ def _child_hwnd(parent_hwnd: int, left: int, top: int, width: int, height: int) 
     user32.CreateWindowExW.restype = wt.HWND
     hwnd = user32.CreateWindowExW(
         0, cls, "mpv", 0x40000000 | 0x10000000, left, top, width, height,
-        parent_hwnd, None, wc.hInstance, None)
+        parent_hwnd, None, kernel32.GetModuleHandleW(None), None)
     return int(hwnd or 0)
 
 
@@ -280,6 +293,7 @@ class MpvSession(QObject):
                 self._ipc.send(["quit"])
             except OSError:
                 pass
+            self._ipc.close()
         if self._process:
             self._process.terminate()
         self._ipc = None
