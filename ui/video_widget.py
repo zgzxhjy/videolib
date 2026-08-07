@@ -1,0 +1,33 @@
+"""视频承载容器: 一个普通 QWidget, mpv 子窗口渲染内容嵌在它内部。"""
+from PyQt6.QtCore import QEvent
+from PyQt6.QtWidgets import QWidget
+
+from services.mpv_session import _child_hwnd, _set_child_rect
+
+
+class VideoWidget(QWidget):
+    """纯容器。内部创建一个 Win32 子窗口承载 mpv 渲染; 尺寸变化时同步。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._child = 0
+        self.setMinimumSize(160, 90)
+
+    def ensure_child(self) -> int:
+        if not self._child:
+            self._child = _child_hwnd(int(self.winId()), 0, 0,
+                                      max(1, self.width()), max(1, self.height()))
+        return self._child
+
+    def child_hwnd(self) -> int:
+        return self._child
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._child:
+            _set_child_rect(self._child, 0, 0,
+                            max(1, self.width()), max(1, self.height()))
+
+    def closeEvent(self, event) -> None:
+        self._child = 0
+        super().closeEvent(event)

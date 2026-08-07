@@ -6,8 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from PyQt6.QtCore import QObject, QUrl, Qt, pyqtSignal
-from PyQt6.QtMultimedia import QMediaPlayer
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -27,27 +26,55 @@ def player_env(tmp_path):
     repo.close()
 
 
-class FakePlayer(QObject):
+class FakeSession(QObject):
     positionChanged = pyqtSignal(int)
     durationChanged = pyqtSignal(int)
+    stateChanged = pyqtSignal(object)
     mediaStatusChanged = pyqtSignal(object)
+    endOfMedia = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent_widget, parent=None):
         super().__init__(parent)
+        self.parent_widget = parent_widget
+        self.loads: list[tuple[str, float]] = []  # (path, resume_sec)
+        self.seeks: list[int] = []
         self._pos = 0
-        self.positions: list[int] = []
-        self.source: QUrl | None = None
         self.rate = 1.0
+        self.volume = 0.8
+        self.muted = False
+        self.state = "stopped"
 
-    def setSource(self, url):
-        self.source = url
+    def start(self):
+        pass
 
-    def setPlaybackRate(self, rate):
-        self.rate = rate
+    def close(self):
+        pass
 
-    def setPosition(self, ms):
-        self.positions.append(ms)
+    def load(self, path, resume_sec=0.0):
+        self.loads.append((path, resume_sec))
+
+    def play(self):
+        self.state = "playing"
+
+    def pause(self):
+        self.state = "paused"
+
+    def stop(self):
+        self.state = "stopped"
+        self._pos = 0
+
+    def seek(self, ms):
+        self.seeks.append(ms)
         self._pos = ms
+
+    def set_volume(self, value):
+        self.volume = value
+
+    def set_mute(self, muted):
+        self.muted = muted
+
+    def set_rate(self, rate):
+        self.rate = rate
 
     def position(self):
         return self._pos
@@ -55,32 +82,8 @@ class FakePlayer(QObject):
     def duration(self):
         return 100_000  # 100s
 
-    def play(self):
+    def resize(self, width, height):
         pass
-
-    def stop(self):
-        pass
-
-    def playbackState(self):
-        return QMediaPlayer.PlaybackState.StoppedState
-
-    def setVideoOutput(self, w):
-        pass
-
-    def setAudioOutput(self, a):
-        pass
-
-
-class FakeAudioOutput:
-    def __init__(self, parent=None):
-        self.volume = 0.8
-        self.muted = False
-
-    def setVolume(self, v):
-        self.volume = v
-
-    def setMuted(self, m):
-        self.muted = m
 
 
 @pytest.fixture()
@@ -90,8 +93,7 @@ def fake_player(monkeypatch, tmp_path):
     import ui.player as player_mod
 
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
-    monkeypatch.setattr(player_mod, "QMediaPlayer", FakePlayer)
-    monkeypatch.setattr(player_mod, "QAudioOutput", FakeAudioOutput)
+    monkeypatch.setattr(player_mod, "MpvSession", FakeSession)
 
 
 def _ensure_video(player_env):
@@ -125,14 +127,14 @@ def _window(player_env, duration=None):
     return PlayerWindow(v, player_env)
 
 
-def test_resume_seek_happens_on_loaded(qapp, player_env, fake_player):
+def test_resume_sec_passed_on_load(qapp, player_env, fake_player):
     a = _ensure_video(player_env)
     player_env.record_play(a.id, 42.0)
     w = _window(player_env, duration=100.0)
     try:
-        assert w.player.positions == [], "must not seek before the media is loaded"
-        w._on_status(QMediaPlayer.MediaStatus.LoadedMedia)
-        assert w.player.positions == [42000], "resume seek must run once media is loaded"
+        path, resume = w.session.loads[-1]
+        assert path == r"D:\v\a.mp4"
+        assert resume == 42.0, "resume point must reach the session as start= seconds"
     finally:
         w.close()
 
@@ -141,14 +143,12 @@ def test_no_resume_below_threshold_or_near_end(qapp, player_env, fake_player):
     a = _ensure_video(player_env)
     player_env.record_play(a.id, 3.0)
     w = _window(player_env, duration=100.0)
-    w._on_status(QMediaPlayer.MediaStatus.LoadedMedia)
-    assert w.player.positions == [], "positions under 5s must not resume"
+    assert w.session.loads[-1][1] == 0.0, "positions under 5s must not resume"
     w.close()
 
     player_env.record_play(a.id, 95.0)
     w2 = _window(player_env, duration=100.0)
-    w2._on_status(QMediaPlayer.MediaStatus.LoadedMedia)
-    assert w2.player.positions == [], "positions beyond 90% of duration must not resume"
+    assert w2.session.loads[-1][1] == 0.0, "positions beyond 90% of duration must not resume"
     w2.close()
 
 
@@ -158,11 +158,11 @@ def test_arrow_keys_control_progress_and_volume(qapp, player_env, fake_player):
     try:
         w.show()
         QTest.keyClick(w, Qt.Key.Key_Right)
-        assert w.player.position() == 5000, "right arrow seeks +5s"
+        assert w.session.position() == 5000, "right arrow seeks +5s"
         QTest.keyClick(w, Qt.Key.Key_Right)
-        assert w.player.position() == 10000
+        assert w.session.position() == 10000
         QTest.keyClick(w, Qt.Key.Key_Left)
-        assert w.player.position() == 5000, "left arrow seeks -5s"
+        assert w.session.position() == 5000, "left arrow seeks -5s"
 
         assert w.vol.value() == 80
         QTest.keyClick(w, Qt.Key.Key_Up)
@@ -170,7 +170,7 @@ def test_arrow_keys_control_progress_and_volume(qapp, player_env, fake_player):
         QTest.keyClick(w, Qt.Key.Key_Down)
         QTest.keyClick(w, Qt.Key.Key_Down)
         assert w.vol.value() == 75, "down arrow lowers volume"
-        assert w.audio.volume == pytest.approx(0.75)
+        assert w.session.volume == pytest.approx(0.75)
     finally:
         w.close()
 
@@ -179,7 +179,7 @@ def test_esc_closes_and_records_position(qapp, player_env, fake_player):
     a = _ensure_video(player_env)
     w = _window(player_env)
     w.show()
-    w.player.setPosition(60_000)
+    w.session.seek(60_000)
     QTest.keyClick(w, Qt.Key.Key_Escape)
     assert not w.isVisible(), "Esc must close the player"
     assert player_env.last_position(a.id) == 60.0
@@ -191,16 +191,16 @@ def test_rate_button_cycles_and_r_key(qapp, player_env, fake_player):
     try:
         assert w.btn_rate.text() == "倍速 1x"
         w.btn_rate.click()
-        assert w.player.rate == 1.25 and w.btn_rate.text() == "倍速 1.25x"
+        assert w.session.rate == 1.25 and w.btn_rate.text() == "倍速 1.25x"
         w.btn_rate.click()
         w.btn_rate.click()
-        assert w.player.rate == 2.0 and w.btn_rate.text() == "倍速 2x"
+        assert w.session.rate == 2.0 and w.btn_rate.text() == "倍速 2x"
         w.btn_rate.click()
-        assert w.player.rate == 0.5, "rate must wrap around"
+        assert w.session.rate == 0.5, "rate must wrap around"
         w.btn_rate.click()
-        assert w.player.rate == 1.0, "rate must wrap back to 1x"
+        assert w.session.rate == 1.0, "rate must wrap back to 1x"
         QTest.keyClick(w, Qt.Key.Key_R)
-        assert w.player.rate == 1.25, "R must cycle the rate too"
+        assert w.session.rate == 1.25, "R must cycle the rate too"
     finally:
         w.close()
 
@@ -256,24 +256,22 @@ def _ensure_videos(player_env, *names):
 
 
 def test_queue_auto_advances_on_natural_end(qapp, player_env, fake_player):
-    from PyQt6.QtCore import QUrl
-
     from ui.player import PlayerWindow
 
     a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
     w = PlayerWindow(a, player_env, queue=[a, b, c])
     try:
         assert w.windowTitle() == "a.mp4"
-        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        w._on_end()
         assert w.windowTitle() == "b.mp4", "natural end must advance to the next video"
-        assert w.player.source == QUrl.fromLocalFile(r"D:\v\b.mp4")
+        assert w.session.loads[-1][0] == r"D:\v\b.mp4"
         assert w.btn_prev.isEnabled() and w.btn_next.isEnabled()
 
-        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        w._on_end()
         assert w.windowTitle() == "c.mp4"
         assert not w.btn_next.isEnabled(), "last video must disable the next button"
 
-        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        w._on_end()
         assert not w.isVisible(), "the last video must close the window"
         assert player_env.last_position(a.id) == 0.0
         assert player_env.last_position(b.id) == 0.0
@@ -283,8 +281,6 @@ def test_queue_auto_advances_on_natural_end(qapp, player_env, fake_player):
 
 
 def test_queue_buttons_switch_without_replay_of_resume(qapp, player_env, fake_player):
-    from PyQt6.QtCore import QUrl
-
     from ui.player import PlayerWindow
 
     a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
@@ -297,8 +293,8 @@ def test_queue_buttons_switch_without_replay_of_resume(qapp, player_env, fake_pl
         w.btn_prev.click()
         assert w.windowTitle() == "a.mp4"
         assert not w.btn_prev.isEnabled(), "first video must disable the previous button"
-        assert w.player.source == QUrl.fromLocalFile(r"D:\v\a.mp4")
-        assert w.player.positions == [], "switching must not seek before LoadedMedia"
+        assert w.session.loads[-1][0] == r"D:\v\a.mp4"
+        assert w.session.loads[-1][1] == 0.0, "switching must not carry over a resume point"
 
         w.btn_next.click()
         w.btn_next.click()
@@ -314,7 +310,7 @@ def test_queue_end_of_middle_records_but_keeps_window(qapp, player_env, fake_pla
 
     a, b = _ensure_videos(player_env, "a.mp4", "b.mp4")
     w = PlayerWindow(a, player_env, queue=[a, b])
-    w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+    w._on_end()
     assert player_env.last_position(a.id) == 0.0, "finished video must be recorded"
     assert w.isVisible() or True  # window stays open for the next video
     w.close()
@@ -326,23 +322,21 @@ def test_mute_toggle_button_and_m_key(qapp, player_env, fake_player):
     try:
         assert w.btn_mute.text() == "静音"
         w.btn_mute.click()
-        assert w.audio.muted is True, "mute button must mute the audio output"
+        assert w.session.muted is True, "mute button must mute the session"
         assert w.btn_mute.text() == "已静音"
 
         w.btn_mute.click()
-        assert w.audio.muted is False
+        assert w.session.muted is False
 
         QTest.keyClick(w, Qt.Key.Key_M)
-        assert w.audio.muted is True, "M must toggle mute too"
+        assert w.session.muted is True, "M must toggle mute too"
         QTest.keyClick(w, Qt.Key.Key_M)
-        assert w.audio.muted is False
+        assert w.session.muted is False
     finally:
         w.close()
 
 
 def test_loop_single_replays_current(qapp, player_env, fake_player):
-    from PyQt6.QtCore import QUrl
-
     from ui.player import PlayerWindow
 
     a, b = _ensure_videos(player_env, "a.mp4", "b.mp4")
@@ -352,17 +346,15 @@ def test_loop_single_replays_current(qapp, player_env, fake_player):
         w.btn_loop.click()
         assert w.btn_loop.text() == "循环:单曲"
 
-        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        w._on_end()
         assert w.windowTitle() == "a.mp4", "single loop must replay the current video"
-        assert w.player.source == QUrl.fromLocalFile(r"D:\v\a.mp4")
-        assert w.player.positions == [], "single loop must not seek (no resume)"
+        assert w.session.loads[-1][0] == r"D:\v\a.mp4"
+        assert w.session.loads[-1][1] == 0.0, "single loop must not seek (no resume)"
     finally:
         w.close()
 
 
 def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
-    from PyQt6.QtCore import QUrl
-
     from ui.player import PlayerWindow
 
     a, b, c = _ensure_videos(player_env, "a.mp4", "b.mp4", "c.mp4")
@@ -372,9 +364,9 @@ def test_loop_all_wraps_to_first(qapp, player_env, fake_player):
         w.btn_loop.click()
         assert w.btn_loop.text() == "循环:全部"
 
-        w._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+        w._on_end()
         assert w.windowTitle() == "a.mp4", "all loop must wrap to the first video"
-        assert w.player.source == QUrl.fromLocalFile(r"D:\v\a.mp4")
+        assert w.session.loads[-1][0] == r"D:\v\a.mp4"
         assert player_env.last_position(c.id) == 0.0
 
         QTest.keyClick(w, Qt.Key.Key_L)

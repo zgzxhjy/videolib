@@ -1,6 +1,4 @@
-from PyQt6.QtCore import QEvent, QUrl, Qt, pyqtSignal
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtMultimediaWidgets import QVideoWidget
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -13,12 +11,13 @@ from PyQt6.QtWidgets import (
 import config
 from domain.models import Video
 from domain.repository import Repository
+from services.mpv_session import MpvSession
+from ui.video_widget import VideoWidget
 
-# Resolved once at import so callers (and tests that stub QMediaPlayer) can
-# never shadow them at call time.
-_MEDIA_END = QMediaPlayer.MediaStatus.EndOfMedia
-_MEDIA_LOADED = QMediaPlayer.MediaStatus.LoadedMedia
-_PLAYBACK_PLAYING = QMediaPlayer.PlaybackState.PlayingState
+# Playback-state strings emitted by MpvSession.
+_PLAYING = "playing"
+_PAUSED = "paused"
+_STOPPED = "stopped"
 
 
 class PlayerWindow(QWidget):
@@ -54,12 +53,10 @@ class PlayerWindow(QWidget):
         self.resize(960, 560)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        self.video_widget = QVideoWidget()
+        self.video_widget = VideoWidget()
         self.video_widget.installEventFilter(self)
-        self.player = QMediaPlayer(self)
-        self.audio = QAudioOutput(self)
-        self.player.setVideoOutput(self.video_widget)
-        self.player.setAudioOutput(self.audio)
+        self.session = MpvSession(self.video_widget, parent=self)
+        self.session.start()
 
         self.btn_prev = QPushButton("⏮")
         self.btn_prev.clicked.connect(self._prev)
@@ -80,12 +77,12 @@ class PlayerWindow(QWidget):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.sliderPressed.connect(lambda: self._set_seeking(True))
         self.slider.sliderReleased.connect(self._seek_to_slider)
-        self.slider.sliderMoved.connect(lambda v: self.time_label.setText(f"{_fmt(v)} / {_fmt(self.player.duration() // 1000)}"))
+        self.slider.sliderMoved.connect(lambda v: self.time_label.setText(f"{_fmt(v)} / {_fmt(self.session.duration() // 1000)}"))
 
         self.vol = QSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setValue(int(config.load_settings().get("volume", 80)))
-        self.vol.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
+        self.vol.valueChanged.connect(lambda v: self.session.set_volume(v / 100))
 
         controls = QHBoxLayout()
         controls.addWidget(self.btn_prev)
@@ -104,9 +101,10 @@ class PlayerWindow(QWidget):
         layout.addWidget(self.video_widget, 1)
         layout.addLayout(controls)
 
-        self.player.positionChanged.connect(self._on_position)
-        self.player.durationChanged.connect(lambda _d: self._refresh_label())
-        self.player.mediaStatusChanged.connect(self._on_status)
+        self.session.positionChanged.connect(self._on_position)
+        self.session.durationChanged.connect(lambda _d: self._refresh_label())
+        self.session.mediaStatusChanged.connect(self._on_status)
+        self.session.endOfMedia.connect(self._on_end)
 
         self._start()
         self.setFocus()
@@ -125,8 +123,8 @@ class PlayerWindow(QWidget):
         resume = self._repo.last_position(self._video.id)
         if resume > 5.0 and (self._video.duration is None or resume < self._video.duration * 0.9):
             self._resume_pos = resume
-        self.player.setSource(QUrl.fromLocalFile(self._video.filepath))
-        self.player.play()
+        self.session.load(self._video.filepath, resume_sec=self._resume_pos)
+        self._resume_pos = 0.0
         self.time_label.setText("00:00 / 00:00")
         self._update_nav_buttons()
 
@@ -143,17 +141,17 @@ class PlayerWindow(QWidget):
         self.btn_next.setEnabled(self._queue_index < len(self._queue) - 1)
 
     def _toggle_play(self) -> None:
-        if self.player.playbackState() == _PLAYBACK_PLAYING:
-            self.player.pause()
+        if self.session.state() == _PLAYING:
+            self.session.pause()
             self.btn_play.setText("播放")
         else:
-            self.player.play()
+            self.session.play()
             self.btn_play.setText("暂停")
 
     def _cycle_rate(self) -> None:
         self._rate_idx = (self._rate_idx + 1) % len(self.RATES)
         self._rate = self.RATES[self._rate_idx]
-        self.player.setPlaybackRate(self._rate)
+        self.session.set_rate(self._rate)
         self.btn_rate.setText(self._rate_label())
 
     def _rate_label(self) -> str:
@@ -161,7 +159,7 @@ class PlayerWindow(QWidget):
 
     def _toggle_mute(self) -> None:
         self._muted = not self._muted
-        self.audio.setMuted(self._muted)
+        self.session.set_mute(self._muted)
         self.btn_mute.setText("已静音" if self._muted else "静音")
 
     def _cycle_loop(self) -> None:
@@ -184,58 +182,57 @@ class PlayerWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def _stop(self) -> None:
-        self.player.stop()
+        self.session.stop()
         self.btn_play.setText("播放")
 
     def _set_seeking(self, value: bool) -> None:
         self._user_seeking = value
 
     def _seek_to_slider(self) -> None:
-        self.player.setPosition(self.slider.value())
+        self.session.seek(self.slider.value())
         self._set_seeking(False)
 
     def _on_position(self, pos_ms: int) -> None:
         if not self._user_seeking:
-            self.slider.setMaximum(self.player.duration())
+            self.slider.setMaximum(self.session.duration())
             self.slider.setValue(pos_ms)
-        self.time_label.setText(f"{_fmt(pos_ms // 1000)} / {_fmt(self.player.duration() // 1000)}")
+        self.time_label.setText(f"{_fmt(pos_ms // 1000)} / {_fmt(self.session.duration() // 1000)}")
 
     def _refresh_label(self) -> None:
-        self.slider.setMaximum(self.player.duration())
+        self.slider.setMaximum(self.session.duration())
 
     def _on_status(self, status) -> None:
         if self._closing:
             return
-        if status == _MEDIA_END:
-            if self._loop_mode == 1:
-                # single loop: mark finished, replay the same video
-                self._repo.record_play(self._video.id, 0.0)
-                self._load(self._queue_index)
-            elif self._queue_index < len(self._queue) - 1:
-                # natural end: record the finished video, then roll on
-                self._repo.record_play(self._video.id, 0.0)
-                self._load(self._queue_index + 1)
-            elif self._loop_mode == 2:
-                # all loop: wrap back to the first video
-                self._repo.record_play(self._video.id, 0.0)
-                self._load(0)
-            else:
-                self._finish(0.0)
-        elif status == _MEDIA_LOADED:
-            if self._resume_pos > 0.0:
-                # setPosition before the media is loaded is ignored by
-                # QMediaPlayer; seek only once duration is known.
-                self.player.setPosition(int(self._resume_pos * 1000))
-                self._resume_pos = 0.0
+        if status == "error":
+            self._finish(self.session.position() / 1000.0)
+
+    def _on_end(self) -> None:
+        if self._closing:
+            return
+        if self._loop_mode == 1:
+            # single loop: mark finished, replay the same video
+            self._repo.record_play(self._video.id, 0.0)
+            self._load(self._queue_index)
+        elif self._queue_index < len(self._queue) - 1:
+            # natural end: record the finished video, then roll on
+            self._repo.record_play(self._video.id, 0.0)
+            self._load(self._queue_index + 1)
+        elif self._loop_mode == 2:
+            # all loop: wrap back to the first video
+            self._repo.record_play(self._video.id, 0.0)
+            self._load(0)
+        else:
+            self._finish(0.0)
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
         if key == Qt.Key.Key_Right:
-            self.player.setPosition(self.player.position() + self.SEEK_STEP_S * 1000)
+            self.session.seek(self.session.position() + self.SEEK_STEP_S * 1000)
             event.accept()
             return
         if key == Qt.Key.Key_Left:
-            self.player.setPosition(max(0, self.player.position() - self.SEEK_STEP_S * 1000))
+            self.session.seek(max(0, self.session.position() - self.SEEK_STEP_S * 1000))
             event.accept()
             return
         if key == Qt.Key.Key_Up:
@@ -282,13 +279,13 @@ class PlayerWindow(QWidget):
     def closeEvent(self, event) -> None:
         config.save_setting("volume", self.vol.value())
         if not self._closing:
-            pos = self.player.position() / 1000.0
+            pos = self.session.position() / 1000.0
             if pos < 5.0:
                 # a trivial reopen-and-close must not clobber the resume point
                 pos = max(pos, self._repo.last_position(self._video.id))
             self._repo.record_play(self._video.id, pos)
             self.finished.emit(self._video.id, pos)
-        self.player.stop()
+        self.session.close()
         super().closeEvent(event)
 
 
