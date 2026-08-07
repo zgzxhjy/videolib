@@ -1,6 +1,6 @@
 # VideoLib 开发进度交接文档
 
-> 最后更新：2026-08-07（会话 11/12：删除历史目录后台化 + 「清理所有目录」功能，坑 #31-32）
+> 最后更新：2026-08-07（会话 13：换机兼容性两处——窗口几何屏幕 clamp + 失效扫描根启动提示，坑 #33）
 > 续接方式：新会话开头说「继续开发 D:\videolib 的 VideoLib，先读 PROGRESS.md」
 
 ## 1. 项目概览
@@ -9,7 +9,7 @@
 
 - 语言/框架：Python 3.14 + PyQt6 6.11 + PyAV 18 + SQLite（WAL+FTS5）+ watchdog
 - 打包：PyInstaller 6.21 onefile → `dist\VideoLib.exe`（~83MB，免 Python 环境）
-- 测试：pytest，177 个用例全绿
+- 测试：pytest，190 个用例全绿
 - git：44 个提交，分支 master
 
 ## 2. 已实现功能（全部可用）
@@ -110,6 +110,7 @@ build.bat                               # 打包 → dist\VideoLib.exe
 30. **named pipe 字节流会被 4096 块切半行**：按行拆分时若 `\n` 恰在块边界之后，半行残留会导致后续消息**永久错位**（事件静默丢失，且首条错误对不上号）。修复：read 侧留 `_read_buf` 拼半行，`split(b"\n")` 前先把 buf 与残留拼接，末尾无 `\n` 的残段留到下轮。
 31. **删除历史目录（删除并清除数据）曾是 UI 线程同步执行**：整库备份 + 删行 + 逐文件删缩略图，大目录冻结几十秒无反馈；中途退出会留下 FTS 索引残留（行已删但搜索仍显示幽灵条目）且无入口再清理。修复：**DeleteWorker(QThread) + 进度对话框（同扫描样式，可取消）**，scan_root 记录**最后一步才删**——root 记录是「可重试标记」，中断/取消后重新选择即可幂等清完。配套两个自愈：①启动时 `_heal_fts`（videos 与 videos_fts COUNT 不一致则重建，杜绝搜索幽灵条目）；②孤儿缩略图清理原有逻辑兜底。
 32. **PyQt6 信号有类型强校验**：`pyqtSignal(int, int, str)` 上 emit `Path`（不是 str）直接抛 TypeError，且若在 worker 的 `except Exception` 里被吞掉 → 任务「成功结束」但阶段没跑完，无任何迹象（实测 root_removed 变 False、进度条无更新）。铁律：**emit 前显式 `str()`**；worker 的 except 分支必须发独立 `error` 信号让 UI 可见，不能只用 message。
+33. **换机兼容性两个坑**：①`restoreGeometry` 会把别的分辨率/显示器布局下保存的几何原样恢复——整窗开在屏幕外且无把手拖回（player 的 `_fit_size` 有 clamp，主窗口没有）。修复：恢复后若 `frameGeometry` 与任何屏幕的 `availableGeometry` 无交集 → 移到所在屏中央。②扫描根是绝对路径（含盘符），换机/换盘后全部失效；之前只有 watcher 静默跳过。修复：启动 0ms 定时器检查 `_missing_scan_roots()`，非空弹非模态警告（`QMessageBox.open()` 而非静态 `warning()`——后者嵌套 exec 会卡住测试，且打开即被其他测试的 `processEvents` 触发）。测试注意：`register_scan` 会 normpath（正斜杠变反斜杠），断言必须 `os.path.normpath`。
 
 
 ## 6. 验证手段（可复用）

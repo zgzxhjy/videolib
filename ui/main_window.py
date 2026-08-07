@@ -167,6 +167,14 @@ class MainWindow(QMainWindow):
             self._activate_root(roots[0])
             self._start_watcher(roots, resume=True)
 
+        # Warn about scan roots whose directory no longer exists (e.g. the
+        # library was moved to another machine / a drive letter changed).
+        # Parented single-shot timer, same pattern as the cleanup timers.
+        self._missing_timer = QTimer(self)
+        self._missing_timer.setSingleShot(True)
+        self._missing_timer.timeout.connect(self._warn_missing_scan_roots)
+        self._missing_timer.start(0)
+
     def _update_count_label(self) -> None:
         self._count_label.setText(f"共 {self.model.rowCount():,} 个视频")
 
@@ -178,6 +186,7 @@ class MainWindow(QMainWindow):
         geo = settings.get("window_geometry")
         if isinstance(geo, str) and geo:
             self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
+            self._clamp_to_screen()
         widths = settings.get("column_widths")
         if isinstance(widths, list) and len(widths) == 7:
             header = self.table.horizontalHeader()
@@ -217,6 +226,48 @@ class MainWindow(QMainWindow):
             "sort_order",
             self.table.horizontalHeader().sortIndicatorOrder().value,
         )
+
+    def _clamp_to_screen(self) -> None:
+        """A geometry saved on another resolution/monitor layout can restore
+        fully off-screen, where there is no way to drag the window back.
+        When the restored frame does not intersect any screen, move it to the
+        centre of the screen it is nearest to."""
+        frame = self.frameGeometry()
+        if frame.width() <= 0 or frame.height() <= 0:
+            return
+        screen = (
+            QApplication.screenAt(frame.center())
+            or self.screen()
+            or QApplication.primaryScreen()
+        )
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        if not avail.intersected(frame).isEmpty():
+            return
+        self.move(
+            avail.x() + max(0, (avail.width() - frame.width()) // 2),
+            avail.y() + max(0, (avail.height() - frame.height()) // 2),
+        )
+
+    def _missing_scan_roots(self) -> list[str]:
+        """Scan roots registered in the DB whose directory no longer exists
+        (drive letter changed, library moved, disk unplugged)."""
+        return [r for r in self._repo.get_scan_roots() if not os.path.isdir(r)]
+
+    def _warn_missing_scan_roots(self) -> None:
+        missing = self._missing_scan_roots()
+        if not missing:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("扫描目录不可用")
+        box.setText(
+            "以下扫描目录已不存在，视频条目需要重新扫描：\n\n"
+            + "\n".join(missing)
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.open()
 
     def _start_orphan_cleanup(self) -> None:
         self._cleanup_thread = _OrphanCleanupThread(self._repo, self)
@@ -272,6 +323,7 @@ class MainWindow(QMainWindow):
             self._cleanup_thread = None
 
     def closeEvent(self, event) -> None:
+        self._missing_timer.stop()
         self._save_ui_state()
         self._stop_orphan_cleanup()
         self._stop_metadata_repair()

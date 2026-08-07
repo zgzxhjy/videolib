@@ -607,6 +607,66 @@ def test_window_state_remembered_across_runs(qapp, app_env):
         w2.close()
 
 
+def test_offscreen_geometry_clamped_to_screen(qapp, app_env):
+    """A geometry saved on a different resolution/monitor layout must not
+    restore the window fully off-screen; the frame is dragged back into the
+    available screen."""
+    import config
+
+    from ui.main_window import MainWindow
+
+    w = MainWindow(app_env)
+    w.resize(1100, 700)
+    w.move(-5000, -5000)
+    config.save_setting(
+        "window_geometry",
+        bytes(w.saveGeometry().toBase64()).decode("ascii"),
+    )
+    w.close()
+
+    w2 = MainWindow(app_env)
+    try:
+        w2.show()
+        qapp.processEvents()
+        avail = (w2.screen() or QApplication.primaryScreen()).availableGeometry()
+        assert avail.intersects(w2.frameGeometry()), "off-screen restore must be clamped back"
+    finally:
+        w2.close()
+
+
+def test_missing_scan_roots_warned_at_startup(qapp, app_env, monkeypatch):
+    """Scan roots whose directory no longer exists must be flagged once."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    app_env.register_scan("D:/gone_1")
+    app_env.register_scan("D:/gone_2")
+    opened = []
+    monkeypatch.setattr(QMessageBox, "open", lambda self: opened.append(self))
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        assert len(opened) == 1, "warning shown exactly once per startup"
+        text = opened[0].text()
+        assert os.path.normpath("D:/gone_1") in text
+        assert os.path.normpath("D:/gone_2") in text
+    finally:
+        w.close()
+
+
+def test_existing_scan_roots_silent_startup(qapp, app_env, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QMessageBox
+
+    app_env.register_scan(str(tmp_path))
+    opened = []
+    monkeypatch.setattr(QMessageBox, "open", lambda self: opened.append(self))
+    w = _make_window(app_env)
+    try:
+        qapp.processEvents()
+        assert opened == []
+    finally:
+        w.close()
+
+
 def test_model_sort_natural_filename_and_columns(qapp, app_env):
     """Model sort must use natural keys and raw values, and skip the
     non-sortable thumbnail/play columns."""
