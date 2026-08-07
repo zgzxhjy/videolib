@@ -78,7 +78,7 @@ class PlayerWindow(QWidget):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.sliderPressed.connect(lambda: self._set_seeking(True))
         self.slider.sliderReleased.connect(self._seek_to_slider)
-        self.slider.sliderMoved.connect(lambda v: self.time_label.setText(f"{_fmt(v // 1000)} / {_fmt(self.session.duration() // 1000)}"))
+        self.slider.sliderMoved.connect(self._on_slider_moved)
 
         self.vol = QSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 100)
@@ -224,6 +224,11 @@ class PlayerWindow(QWidget):
     def _seek_to_slider(self) -> None:
         self.session.seek(self.slider.value())
         self._set_seeking(False)
+
+    def _on_slider_moved(self, value: int) -> None:
+        """Live scrubbing: the video follows the drag, not just the release."""
+        self.session.seek(value)
+        self.time_label.setText(f"{_fmt(value // 1000)} / {_fmt(self.session.duration() // 1000)}")
 
     def _on_position(self, pos_ms: int) -> None:
         if not self._user_seeking:
