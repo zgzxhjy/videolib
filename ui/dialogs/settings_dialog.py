@@ -1,4 +1,4 @@
-"""设置对话框: 主题(跟随系统/浅色/深色)、音量记忆、备份保留份数。
+"""设置对话框: 主题(跟随系统/浅色/深色)、音量记忆、备份保留份数、缩略图取样。
 
 「确定」保存到 settings.json 并立即应用主题(apply_theme);「取消」不改任何
 设置。音量与播放器共用 "volume" 键(播放器 closeEvent 记忆同一值)。
@@ -25,6 +25,11 @@ THEME_CHOICES = [
     ("system", "跟随系统"),
     ("light", "浅色"),
     ("dark", "深色"),
+]
+
+THUMB_MODE_CHOICES = [
+    ("random", "随机帧(10%-90%)"),
+    ("fixed", "固定帧(前5%)"),
 ]
 
 
@@ -59,6 +64,16 @@ class SettingsDialog(QDialog):
         self.spin_backup.setValue(int(settings.get("backup_keep", config.BACKUP_KEEP)))
         self.spin_backup.setSuffix(" 份")
 
+        self.combo_thumb = QComboBox()
+        for value, label in THUMB_MODE_CHOICES:
+            self.combo_thumb.addItem(label, value)
+        current_thumb = settings.get("thumb_mode", "random")
+        thumb_idx = next(
+            (i for i, (value, _l) in enumerate(THUMB_MODE_CHOICES) if value == current_thumb),
+            0,
+        )
+        self.combo_thumb.setCurrentIndex(thumb_idx)
+
         volume_row = QHBoxLayout()
         volume_row.addWidget(self.slider_volume)
         volume_row.addWidget(self.volume_label)
@@ -67,6 +82,7 @@ class SettingsDialog(QDialog):
         form.addRow("主题", self.combo_theme)
         form.addRow("音量", volume_row)
         form.addRow("备份保留", self.spin_backup)
+        form.addRow("缩略图取样", self.combo_thumb)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -82,6 +98,7 @@ class SettingsDialog(QDialog):
         config.save_setting("theme", self.combo_theme.currentData())
         config.save_setting("volume", self.slider_volume.value())
         config.save_setting("backup_keep", self.spin_backup.value())
+        config.save_setting("thumb_mode", self.combo_thumb.currentData())
 
         app = QApplication.instance()
         if app is not None:

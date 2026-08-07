@@ -226,8 +226,13 @@ def test_ensure_dedups_across_instances(video_dir, tmp_path, monkeypatch):
 
 def test_thumbnail_seek_fraction_within_range(video_dir, tmp_path, monkeypatch):
     """The sampled frame position must lie inside [10%, 90%] of the video."""
+    import config
+
     from services import thumbnailer as T
 
+    # isolate from the real settings.json: a user-set thumb_mode would change
+    # the sampling strategy and break this assertion
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
     calls = []
 
     def fake_uniform(lo, hi):
@@ -242,6 +247,35 @@ def test_thumbnail_seek_fraction_within_range(video_dir, tmp_path, monkeypatch):
     assert lo == T.THUMB_POS_MIN
     assert hi == T.THUMB_POS_MAX
     assert thumbs.path_for(9).exists()
+
+
+def test_seek_fraction_fixed_mode_is_constant(video_dir, tmp_path, monkeypatch):
+    import config
+
+    from services import thumbnailer as T
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    config.save_setting("thumb_mode", "fixed")
+
+    calls = []
+    monkeypatch.setattr(T.random, "uniform", lambda lo, hi: calls.append((lo, hi)) or 0.5)
+    assert T._seek_fraction() == T.THUMB_POS_FIXED, "fixed mode is deterministic"
+    assert not calls, "fixed mode must not consult the random sampler"
+
+    thumbs = Thumbnailer(tmp_path / "thumbs")
+    assert thumbs.ensure(str(video_dir), video_id=10) is True
+    assert not calls, "generation in fixed mode must stay deterministic"
+    assert thumbs.path_for(10).exists()
+
+
+def test_seek_fraction_defaults_to_random(video_dir, tmp_path, monkeypatch):
+    import config
+
+    from services import thumbnailer as T
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    T.random.uniform = lambda lo, hi: 0.5
+    assert T._seek_fraction() == 0.5, "no thumb_mode setting means random sampling"
 
 
 def test_thumbnail_no_repeat_work(video_dir, tmp_path):

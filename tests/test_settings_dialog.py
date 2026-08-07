@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import QApplication
 
 import config
-from ui.dialogs.settings_dialog import SettingsDialog, THEME_CHOICES
+from ui.dialogs.settings_dialog import SettingsDialog, THEME_CHOICES, THUMB_MODE_CHOICES
 
 
 def _open_dialog(app_env):
@@ -14,6 +14,7 @@ def test_dialog_preloads_current_settings(qapp, app_env):
     config.save_setting("theme", "dark")
     config.save_setting("volume", 42)
     config.save_setting("backup_keep", 9)
+    config.save_setting("thumb_mode", "fixed")
 
     d = _open_dialog(app_env)
     try:
@@ -21,6 +22,7 @@ def test_dialog_preloads_current_settings(qapp, app_env):
         assert d.slider_volume.value() == 42
         assert d.volume_label.text() == "42%"
         assert d.spin_backup.value() == 9
+        assert d.combo_thumb.currentData() == "fixed"
     finally:
         d.close()
 
@@ -31,6 +33,7 @@ def test_dialog_defaults_when_no_settings(qapp, app_env):
         assert d.combo_theme.currentData() == "system"
         assert d.slider_volume.value() == 80
         assert d.spin_backup.value() == config.BACKUP_KEEP
+        assert d.combo_thumb.currentData() == "random"
     finally:
         d.close()
 
@@ -54,6 +57,9 @@ def test_accept_saves_and_applies_theme(qapp, app_env, monkeypatch):
         )
         d.slider_volume.setValue(60)
         d.spin_backup.setValue(3)
+        d.combo_thumb.setCurrentIndex(
+            next(i for i, (v, _l) in enumerate(THUMB_MODE_CHOICES) if v == "fixed")
+        )
         d.accept()
     finally:
         d.close()
@@ -62,6 +68,7 @@ def test_accept_saves_and_applies_theme(qapp, app_env, monkeypatch):
     assert settings["theme"] == "dark"
     assert settings["volume"] == 60
     assert settings["backup_keep"] == 3
+    assert settings["thumb_mode"] == "fixed"
     assert applied, "accept() must apply the new theme"
 
     from ui.theme import app_qss

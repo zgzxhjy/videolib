@@ -18,6 +18,22 @@ THUMB_PIXEL_HEIGHT = THUMB_HEIGHT * THUMB_SCALE
 
 THUMB_POS_MIN = 0.10  # earliest relative position the frame may be sampled from
 THUMB_POS_MAX = 0.90  # latest relative position
+THUMB_POS_FIXED = 0.05  # fixed mode: always this relative position (first 5%)
+
+THUMB_MODE_RANDOM = "random"
+THUMB_MODE_FIXED = "fixed"
+
+
+def _seek_fraction() -> float:
+    """Relative frame position for a thumbnail.
+
+    settings["thumb_mode"]: "fixed" samples a constant spot near the head of
+    the video, "random" (default) keeps the historical 10%-90% random sample.
+    """
+    mode = config.load_settings().get("thumb_mode", THUMB_MODE_RANDOM)
+    if mode == THUMB_MODE_FIXED:
+        return THUMB_POS_FIXED
+    return random.uniform(THUMB_POS_MIN, THUMB_POS_MAX)
 
 # In-flight generation guard. Module-level (not per Thumbnailer instance):
 # every UI caller constructs a fresh Thumbnailer per task, so an instance
@@ -89,9 +105,7 @@ def _extract_frame(filepath: str, thumb_path: Path) -> bool:
             stream.thread_type = "AUTO"
             frame = None
             if stream.duration:
-                seek_pts = int(
-                    stream.duration * random.uniform(THUMB_POS_MIN, THUMB_POS_MAX)
-                )
+                seek_pts = int(stream.duration * _seek_fraction())
                 container.seek(seek_pts, backward=True, any_frame=False, stream=stream)
                 try:
                     frame = next(container.decode(video=0))
